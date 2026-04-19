@@ -3,7 +3,7 @@
 语言：
 
 - [English](README.md)
-- [中文](README_CD.md)
+- [中文](README_CN.md)
 
 SingTray 是一个面向 Windows 的 `sing-box` 桌面控制器，采用明确的分层架构：
 
@@ -213,4 +213,4 @@ dotnet run --project .\SingTray.Service\SingTray.Service.csproj
 
 ## 许可证
 
-当前仓库还没有加入 License 文件。
+本项目采用 MIT License，详见 [LICENSE](LICENSE)。

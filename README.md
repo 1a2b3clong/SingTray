@@ -3,7 +3,7 @@
 Language:
 
 - [English](README.md)
-- [中文](README_CD.md)
+- [中文](README_CN.md)
 
 SingTray is a Windows desktop controller for `sing-box` built with a clear split architecture:
 
@@ -213,4 +213,4 @@ Output:
 
 ## License
 
-No license file has been added yet.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
