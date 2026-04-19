@@ -51,6 +51,11 @@ public sealed class ImportRequest
     public string ImportedFileName { get; set; } = string.Empty;
 }
 
+public sealed class StartRequest
+{
+    public string? LastError { get; set; }
+}
+
 public sealed class OperationResult
 {
     public bool Success { get; set; }

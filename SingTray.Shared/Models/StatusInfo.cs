@@ -8,6 +8,7 @@ public sealed class StatusInfo
     public RunState RunState { get; set; }
     public bool SingBoxRunning { get; set; }
     public int? SingBoxPid { get; set; }
+    public string? ExitStatus { get; set; }
     public CoreInfo Core { get; set; } = new();
     public ConfigInfo Config { get; set; } = new();
     public string? LastError { get; set; }

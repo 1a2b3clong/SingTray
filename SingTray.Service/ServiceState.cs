@@ -56,7 +56,7 @@ public sealed class ServiceState
         }
     }
 
-    public async Task<StatusInfo> CreateStatusSnapshotAsync(CoreInfo core, ConfigInfo config, CancellationToken cancellationToken)
+    public async Task<StatusInfo> CreateStatusSnapshotAsync(CancellationToken cancellationToken)
     {
         var record = await GetRecordAsync(cancellationToken);
         return new StatusInfo
@@ -66,8 +66,21 @@ public sealed class ServiceState
             SingBoxRunning = record.RunState is RunState.Running or RunState.Starting,
             SingBoxPid = record.SingBoxPid,
             LastError = record.LastError,
-            Core = core,
-            Config = config,
+            ExitStatus = record.ExitStatus,
+            Core = new CoreInfo
+            {
+                Installed = record.CoreInstalled,
+                Valid = record.CoreValid,
+                Version = record.CoreVersion,
+                ValidationMessage = record.CoreValidationMessage
+            },
+            Config = new ConfigInfo
+            {
+                Installed = record.ConfigInstalled,
+                Valid = record.ConfigValid,
+                FileName = record.ConfigName,
+                ValidationMessage = record.ConfigValidationMessage
+            },
             Paths = new PathInfo(),
             Timestamp = DateTimeOffset.UtcNow
         };
@@ -100,8 +113,15 @@ public sealed class ServiceState
             RunState = source.RunState,
             SingBoxPid = source.SingBoxPid,
             LastError = source.LastError,
+            ExitStatus = source.ExitStatus,
+            CoreInstalled = source.CoreInstalled,
+            CoreValid = source.CoreValid,
             CoreVersion = source.CoreVersion,
+            CoreValidationMessage = source.CoreValidationMessage,
+            ConfigInstalled = source.ConfigInstalled,
+            ConfigValid = source.ConfigValid,
             ConfigName = source.ConfigName,
+            ConfigValidationMessage = source.ConfigValidationMessage,
             UpdatedAt = source.UpdatedAt
         };
     }

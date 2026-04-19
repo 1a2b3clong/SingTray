@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using System.Text;
+using System.Threading;
 using SingTray.Shared;
 using SingTray.Shared.Constants;
 using SingTray.Shared.Enums;
@@ -9,12 +11,15 @@ namespace SingTray.Service.Services;
 
 public sealed class SingBoxManager
 {
+    private static readonly Regex AnsiEscapeRegex = new(@"\x1B\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
+
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ServiceState _serviceState;
     private readonly LogService _logService;
     private Process? _currentProcess;
     private string? _lastStdErrLine;
     private bool _stopRequested;
+    private int _fatalKillTriggered;
 
     public SingBoxManager(ServiceState serviceState, LogService logService)
     {
@@ -46,17 +51,40 @@ public sealed class SingBoxManager
     public Task<ConfigInfo> ValidateConfigFileAsync(string configPath, CancellationToken cancellationToken) =>
         ValidateConfigPathAsync(configPath, cancellationToken);
 
-    public async Task<OperationResult> StartAsync(CancellationToken cancellationToken)
+    public async Task<OperationResult> StartAsync(StartRequest? startRequest, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);
         try
         {
             if (_currentProcess is { HasExited: false })
             {
+                if (!string.IsNullOrWhiteSpace(startRequest?.LastError) &&
+                    startRequest.LastError.Contains("FATAL", StringComparison.OrdinalIgnoreCase))
+                {
+                    await _logService.WriteWarningAsync("Previous lastError contains FATAL, forcing cleanup before continuing.", cancellationToken);
+                    await CleanupCurrentProcessAsync(cancellationToken);
+                }
+                else
+                {
+                    return OperationResult.Ok("sing-box is already running.");
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(startRequest?.LastError) &&
+                startRequest.LastError.Contains("FATAL", StringComparison.OrdinalIgnoreCase) &&
+                _currentProcess is not null)
+            {
+                await _logService.WriteWarningAsync("Start request carried FATAL lastError, cleaning up residual sing-box process.", cancellationToken);
+                await CleanupCurrentProcessAsync(cancellationToken);
+            }
+
+            if (_currentProcess is { HasExited: false })
+            {
                 return OperationResult.Ok("sing-box is already running.");
             }
 
-            var core = await GetCoreInfoAsync(cancellationToken);
+            var (core, config) = await RefreshComponentStateAsync(cancellationToken);
+
             if (!core.Installed)
             {
                 return await FailStartAsync("Core not installed", cancellationToken);
@@ -67,7 +95,6 @@ public sealed class SingBoxManager
                 return await FailStartAsync(core.ValidationMessage ?? "Core invalid", cancellationToken);
             }
 
-            var config = await GetConfigInfoAsync(cancellationToken);
             if (!config.Installed)
             {
                 return await FailStartAsync("Config not installed", cancellationToken);
@@ -85,6 +112,7 @@ public sealed class SingBoxManager
             }, cancellationToken);
 
             _lastStdErrLine = null;
+            Interlocked.Exchange(ref _fatalKillTriggered, 0);
             var process = BuildProcess(AppPaths.SingBoxExecutablePath, SingBoxConstants.RunArguments, AppPaths.CoreDirectory);
             process.EnableRaisingEvents = true;
             process.OutputDataReceived += (_, args) =>
@@ -98,8 +126,13 @@ public sealed class SingBoxManager
             {
                 if (!string.IsNullOrWhiteSpace(args.Data))
                 {
-                    _lastStdErrLine = args.Data;
-                    _ = _logService.WriteSingBoxOutputAsync("stderr", args.Data, CancellationToken.None);
+                    var cleaned = StripAnsi(args.Data);
+                    _lastStdErrLine = cleaned;
+                    _ = _logService.WriteSingBoxOutputAsync("stderr", cleaned, CancellationToken.None);
+                    if (cleaned.Contains("FATAL[0009]", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _ = ForceKillOnFatalAsync(process, cleaned);
+                    }
                 }
             };
             process.Exited += async (_, _) => await OnProcessExitedAsync(process);
@@ -203,7 +236,7 @@ public sealed class SingBoxManager
         }
     }
 
-    public async Task<OperationResult> RestartAsync(CancellationToken cancellationToken)
+    public async Task<OperationResult> RestartAsync(StartRequest? startRequest, CancellationToken cancellationToken)
     {
         var stop = await StopAsync(cancellationToken);
         if (!stop.Success)
@@ -211,7 +244,7 @@ public sealed class SingBoxManager
             return stop;
         }
 
-        return await StartAsync(cancellationToken);
+        return await StartAsync(startRequest, cancellationToken);
     }
 
     private async Task<ConfigInfo> ValidateConfigPathAsync(string configPath, CancellationToken cancellationToken)
@@ -279,13 +312,8 @@ public sealed class SingBoxManager
 
     public async Task<StatusInfo> GetStatusAsync(CancellationToken cancellationToken)
     {
-        var core = await GetCoreInfoAsync(cancellationToken);
-        var config = await GetConfigInfoAsync(cancellationToken);
-
         await _serviceState.UpdateAsync(record =>
         {
-            record.CoreVersion = core.Version;
-            record.ConfigName = config.FileName;
             if (_currentProcess is null || _currentProcess.HasExited)
             {
                 if (record.RunState is RunState.Running or RunState.Starting or RunState.Stopping)
@@ -296,7 +324,7 @@ public sealed class SingBoxManager
             }
         }, cancellationToken);
 
-        return await _serviceState.CreateStatusSnapshotAsync(core, config, cancellationToken);
+        return await _serviceState.CreateStatusSnapshotAsync(cancellationToken);
     }
 
     private async Task<OperationResult> GetVersionFromExecutableAsync(string executablePath, CancellationToken cancellationToken)
@@ -360,7 +388,7 @@ public sealed class SingBoxManager
             {
                 if (!string.IsNullOrWhiteSpace(args.Data))
                 {
-                    stderr.AppendLine(args.Data);
+                    stderr.AppendLine(StripAnsi(args.Data));
                 }
             };
 
@@ -387,15 +415,23 @@ public sealed class SingBoxManager
     {
         var exitCode = process.ExitCode;
         var isIntentionalStop = _stopRequested;
-        var message = exitCode == 0 || isIntentionalStop ? null : BuildExitMessage(exitCode, _lastStdErrLine);
+        var stderrMessage = string.IsNullOrWhiteSpace(_lastStdErrLine) ? null : _lastStdErrLine;
+        var exitStatus = BuildExitStatus(exitCode);
 
         await _logService.WriteInfoAsync($"sing-box exited with code {exitCode}.", CancellationToken.None);
         await _serviceState.UpdateAsync(record =>
         {
             record.SingBoxPid = null;
             record.RunState = exitCode == 0 || isIntentionalStop ? RunState.Stopped : RunState.Error;
-            record.LastError = message;
+            record.LastError = isIntentionalStop ? null : stderrMessage;
+            record.ExitStatus = exitStatus;
         }, CancellationToken.None);
+
+        if (ReferenceEquals(_currentProcess, process))
+        {
+            _currentProcess.Dispose();
+            _currentProcess = null;
+        }
     }
 
     private async Task<OperationResult> FailStartAsync(string message, CancellationToken cancellationToken, Exception? ex = null)
@@ -404,24 +440,185 @@ public sealed class SingBoxManager
         await _serviceState.UpdateAsync(record =>
         {
             record.RunState = RunState.Error;
-            record.LastError = message;
+            record.LastError = _lastStdErrLine ?? message;
+            record.ExitStatus = "Start failed";
             record.SingBoxPid = null;
         }, cancellationToken);
 
-        if (_currentProcess is not null)
+        await CleanupCurrentProcessAsync(cancellationToken);
+
+        return OperationResult.Fail(message);
+    }
+
+    private async Task<(CoreInfo Core, ConfigInfo Config)> RefreshComponentStateAsync(CancellationToken cancellationToken)
+    {
+        var core = await GetCoreInfoAsync(cancellationToken);
+        var config = await GetConfigInfoAsync(cancellationToken);
+
+        await _serviceState.UpdateAsync(record =>
+        {
+            record.CoreInstalled = core.Installed;
+            record.CoreValid = core.Valid;
+            record.CoreVersion = core.Version;
+            record.CoreValidationMessage = core.ValidationMessage;
+            record.ConfigInstalled = config.Installed;
+            record.ConfigValid = config.Valid;
+            record.ConfigName = config.FileName;
+            record.ConfigValidationMessage = config.ValidationMessage;
+        }, cancellationToken);
+
+        return (core, config);
+    }
+
+    private async Task CleanupCurrentProcessAsync(CancellationToken cancellationToken)
+    {
+        if (_currentProcess is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!_currentProcess.HasExited)
+            {
+                await _logService.WriteWarningAsync($"Cleaning up sing-box PID {_currentProcess.Id} after start failure.", cancellationToken);
+                await ForceTerminateProcessAsync(_currentProcess, "start failure cleanup", cancellationToken);
+            }
+        }
+        catch (Exception cleanupEx)
+        {
+            await _logService.WriteErrorAsync("Failed to clean up sing-box after start failure.", cleanupEx, cancellationToken);
+        }
+        finally
         {
             _currentProcess.Dispose();
             _currentProcess = null;
         }
+    }
 
-        return OperationResult.Fail(message);
+    private async Task ForceKillOnFatalAsync(Process process, string fatalMessage)
+    {
+        if (Interlocked.Exchange(ref _fatalKillTriggered, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            await _logService.WriteWarningAsync($"Fatal startup marker detected, forcing sing-box shutdown: {fatalMessage}", CancellationToken.None);
+
+            if (process.HasExited)
+            {
+                return;
+            }
+
+            await ForceTerminateProcessAsync(process, "fatal startup marker", CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            await _logService.WriteErrorAsync("Failed to force-kill sing-box after fatal startup marker.", ex, CancellationToken.None);
+        }
+    }
+
+    private async Task ForceTerminateProcessAsync(Process process, string reason, CancellationToken cancellationToken)
+    {
+        if (process.HasExited)
+        {
+            return;
+        }
+
+        var pid = process.Id;
+
+        try
+        {
+            await _logService.WriteWarningAsync($"Force terminating sing-box PID {pid} due to {reason}.", cancellationToken);
+            process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            await _logService.WriteErrorAsync($"Managed Kill failed for sing-box PID {pid}.", ex, cancellationToken);
+        }
+
+        if (await WaitForExitAsync(process, 2500, cancellationToken))
+        {
+            await _logService.WriteInfoAsync($"sing-box PID {pid} terminated by managed kill.", cancellationToken);
+            return;
+        }
+
+        await _logService.WriteWarningAsync($"Managed kill did not fully terminate sing-box PID {pid}, falling back to taskkill.", cancellationToken);
+        await ForceTerminateWithTaskKillAsync(pid, cancellationToken);
+
+        if (await WaitForExitAsync(process, 2500, cancellationToken))
+        {
+            await _logService.WriteInfoAsync($"sing-box PID {pid} terminated by taskkill fallback.", cancellationToken);
+            return;
+        }
+
+        await _logService.WriteWarningAsync($"sing-box PID {pid} still appears alive after taskkill fallback.", cancellationToken);
+    }
+
+    private async Task ForceTerminateWithTaskKillAsync(int pid, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var taskKill = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "taskkill.exe",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
+            };
+
+            taskKill.StartInfo.ArgumentList.Add("/PID");
+            taskKill.StartInfo.ArgumentList.Add(pid.ToString());
+            taskKill.StartInfo.ArgumentList.Add("/T");
+            taskKill.StartInfo.ArgumentList.Add("/F");
+
+            taskKill.Start();
+            var stdoutTask = taskKill.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = taskKill.StandardError.ReadToEndAsync(cancellationToken);
+            await taskKill.WaitForExitAsync(cancellationToken);
+
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+            if (taskKill.ExitCode == 0)
+            {
+                await _logService.WriteInfoAsync($"taskkill succeeded for sing-box PID {pid}: {stdout.Trim()}", cancellationToken);
+            }
+            else
+            {
+                await _logService.WriteWarningAsync($"taskkill exit code {taskKill.ExitCode} for sing-box PID {pid}: {stderr.Trim()}", cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            await _logService.WriteErrorAsync($"taskkill fallback failed for sing-box PID {pid}.", ex, cancellationToken);
+        }
     }
 
     private static string BuildExitMessage(int exitCode, string? stderr)
     {
         return string.IsNullOrWhiteSpace(stderr)
             ? $"sing-box exited with code {exitCode}."
-            : $"sing-box exited with code {exitCode}: {stderr.Trim()}";
+            : $"sing-box exited with code {exitCode}: {StripAnsi(stderr).Trim()}";
+    }
+
+    private static string BuildExitStatus(int exitCode)
+    {
+        return exitCode == 0 ? "Exited normally" : $"Exited with code {exitCode}";
+    }
+
+    private static string StripAnsi(string value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? value : AnsiEscapeRegex.Replace(value, string.Empty);
     }
 
     private static async Task<bool> WaitForExitAsync(Process process, int milliseconds, CancellationToken cancellationToken)

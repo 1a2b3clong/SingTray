@@ -16,14 +16,20 @@ public sealed class PipeClient : IDisposable
     public Task<StatusInfo> GetStatusAsync(CancellationToken cancellationToken) =>
         SendForDataAsync<StatusInfo>(new PipeRequest { Action = "get_status" }, SingBoxConstants.PipeTimeoutMilliseconds, cancellationToken);
 
-    public Task<OperationResult> StartAsync(CancellationToken cancellationToken) =>
-        SendForDataAsync<OperationResult>(new PipeRequest { Action = "start" }, SingBoxConstants.PipeTimeoutMilliseconds, cancellationToken);
+    public Task<OperationResult> StartAsync(StartRequest request, CancellationToken cancellationToken) =>
+        SendForDataAsync<OperationResult>(
+            new PipeRequest { Action = "start", Payload = JsonSerializer.SerializeToElement(request, PipeContracts.JsonOptions) },
+            SingBoxConstants.PipeTimeoutMilliseconds,
+            cancellationToken);
 
     public Task<OperationResult> StopAsync(CancellationToken cancellationToken) =>
         SendForDataAsync<OperationResult>(new PipeRequest { Action = "stop" }, SingBoxConstants.PipeTimeoutMilliseconds, cancellationToken);
 
-    public Task<OperationResult> RestartAsync(CancellationToken cancellationToken) =>
-        SendForDataAsync<OperationResult>(new PipeRequest { Action = "restart" }, SingBoxConstants.PipeTimeoutMilliseconds, cancellationToken);
+    public Task<OperationResult> RestartAsync(StartRequest request, CancellationToken cancellationToken) =>
+        SendForDataAsync<OperationResult>(
+            new PipeRequest { Action = "restart", Payload = JsonSerializer.SerializeToElement(request, PipeContracts.JsonOptions) },
+            SingBoxConstants.PipeTimeoutMilliseconds,
+            cancellationToken);
 
     public Task<OperationResult> ImportConfigAsync(string importedFileName, CancellationToken cancellationToken) =>
         SendForDataAsync<OperationResult>(

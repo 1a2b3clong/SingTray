@@ -19,6 +19,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private StatusInfo? _lastStatus;
     private string? _lastConnectionFailure;
     private bool _isBusy;
+    private bool _isExiting;
     private readonly Icon _runningIcon;
     private readonly Icon _stoppedIcon;
     private readonly Icon _errorIcon;
@@ -32,12 +33,23 @@ public sealed class TrayApplicationContext : ApplicationContext
         _statusPoller = new StatusPoller(pipeClient);
         _statusPoller.StatusUpdated += (_, status) =>
         {
+            if (_isExiting)
+            {
+                return;
+            }
+
             _lastStatus = status;
             _lastConnectionFailure = null;
             RefreshUi(serviceAvailable: true);
         };
         _statusPoller.PollFailed += async (_, ex) =>
         {
+            if (_isExiting && IsExpectedExitException(ex))
+            {
+                await _clientLogService.WriteInfoAsync($"Status poll suppressed during exit: {BuildConnectionFailureMessage(ex)}");
+                return;
+            }
+
             _lastStatus = null;
             _lastConnectionFailure = BuildConnectionFailureMessage(ex);
             await _clientLogService.WriteWarningAsync($"Status poll failed: {_lastConnectionFailure}");
@@ -96,7 +108,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
             if (shouldBeRunning && !_lastStatus.SingBoxRunning)
             {
-                await ExecuteOperationAsync(() => _pipeClient.StartAsync(CancellationToken.None), showMessageOnSuccess: false);
+                await ExecuteOperationAsync(() => _pipeClient.StartAsync(BuildStartRequest(), CancellationToken.None), showMessageOnSuccess: false);
                 await _statusPoller.PollNowAsync();
             }
             else if (!shouldBeRunning && _lastStatus.SingBoxRunning)
@@ -144,12 +156,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         else if (_lastStatus.RunState == RunState.Error)
         {
             await _desiredStateStore.WriteAsync(true);
-            await ExecuteOperationAsync(() => _pipeClient.RestartAsync(CancellationToken.None));
+            await ExecuteOperationAsync(() => _pipeClient.RestartAsync(BuildStartRequest(), CancellationToken.None));
         }
         else
         {
             await _desiredStateStore.WriteAsync(true);
-            await ExecuteOperationAsync(() => _pipeClient.StartAsync(CancellationToken.None));
+            await ExecuteOperationAsync(() => _pipeClient.StartAsync(BuildStartRequest(), CancellationToken.None));
         }
 
         await _statusPoller.PollNowAsync();
@@ -238,20 +250,26 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private async void OnExitRequested(object? sender, EventArgs e)
     {
-        if (_isBusy)
+        if (_isBusy || _isExiting)
         {
             return;
         }
+
+        _isExiting = true;
+        _statusPoller.Stop();
 
         var shouldRestore = _lastStatus?.SingBoxRunning ?? false;
         await _desiredStateStore.WriteAsync(shouldRestore);
         try
         {
-            await ExecuteOperationAsync(() => _pipeClient.StopAsync(CancellationToken.None), showMessageOnSuccess: false);
+            await ExecuteOperationAsync(
+                () => _pipeClient.StopAsync(CancellationToken.None),
+                showMessageOnSuccess: false,
+                suppressExpectedExitErrors: true);
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort on exit.
+            await _clientLogService.WriteWarningAsync($"Exit stop request completed with a suppressed error: {ex.Message}");
         }
 
         ExitThread();
@@ -269,7 +287,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         base.ExitThreadCore();
     }
 
-    private async Task ExecuteOperationAsync(Func<Task<OperationResult>> action, bool showMessageOnSuccess = true)
+    private async Task ExecuteOperationAsync(
+        Func<Task<OperationResult>> action,
+        bool showMessageOnSuccess = true,
+        bool suppressExpectedExitErrors = false)
     {
         if (_isBusy)
         {
@@ -282,6 +303,12 @@ public sealed class TrayApplicationContext : ApplicationContext
             var result = await action();
             if (!result.Success)
             {
+                if (suppressExpectedExitErrors && _isExiting)
+                {
+                    await _clientLogService.WriteWarningAsync($"Suppressed exit-time service error: {result.Message}");
+                    return;
+                }
+
                 ShowError(result.Message);
                 return;
             }
@@ -293,6 +320,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
         catch (Exception ex)
         {
+            if (suppressExpectedExitErrors && _isExiting && IsExpectedExitException(ex))
+            {
+                await _clientLogService.WriteInfoAsync($"Suppressed expected exit-time exception: {ex.Message}");
+                return;
+            }
+
             ShowError(ex.Message);
         }
         finally
@@ -348,6 +381,24 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         return ex.Message;
+    }
+
+    private StartRequest BuildStartRequest()
+    {
+        return new StartRequest
+        {
+            LastError = _lastStatus?.LastError
+        };
+    }
+
+    private static bool IsExpectedExitException(Exception ex)
+    {
+        if (ex is PipeClientException pipeEx)
+        {
+            return pipeEx.Kind is PipeFailureKind.Timeout or PipeFailureKind.PipeNotFound;
+        }
+
+        return ex is TimeoutException or IOException;
     }
 
     private static Icon CreateStatusIcon(Color color)

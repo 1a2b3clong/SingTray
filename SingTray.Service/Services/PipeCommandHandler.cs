@@ -27,9 +27,9 @@ public sealed class PipeCommandHandler
             {
                 "ping" => PipeResponse.FromSuccess(new PingInfo()),
                 "get_status" => PipeResponse.FromSuccess(await _singBoxManager.GetStatusAsync(cancellationToken)),
-                "start" => ToResponse(await _singBoxManager.StartAsync(cancellationToken)),
+                "start" => ToResponse(await _singBoxManager.StartAsync(ReadStartRequest(request), cancellationToken)),
                 "stop" => ToResponse(await _singBoxManager.StopAsync(cancellationToken)),
-                "restart" => ToResponse(await _singBoxManager.RestartAsync(cancellationToken)),
+                "restart" => ToResponse(await _singBoxManager.RestartAsync(ReadStartRequest(request), cancellationToken)),
                 "import_config" => ToResponse(await _importService.ImportConfigAsync(ReadImportRequest(request).ImportedFileName, cancellationToken)),
                 "import_core" => ToResponse(await _importService.ImportCoreAsync(ReadImportRequest(request).ImportedFileName, cancellationToken)),
                 "get_paths" => PipeResponse.FromSuccess(new PathInfo()),
@@ -52,6 +52,17 @@ public sealed class PipeCommandHandler
 
         return JsonSerializer.Deserialize<ImportRequest>(request.Payload.Value.GetRawText(), PipeContracts.JsonOptions)
             ?? throw new InvalidOperationException("Import payload is invalid.");
+    }
+
+    private static StartRequest ReadStartRequest(PipeRequest request)
+    {
+        if (request.Payload is null)
+        {
+            return new StartRequest();
+        }
+
+        return JsonSerializer.Deserialize<StartRequest>(request.Payload.Value.GetRawText(), PipeContracts.JsonOptions)
+            ?? new StartRequest();
     }
 
     private static PipeResponse ToResponse(OperationResult result) =>

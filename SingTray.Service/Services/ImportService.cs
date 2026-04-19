@@ -1,13 +1,10 @@
 using System.IO.Compression;
-using System.Text.RegularExpressions;
 using SingTray.Shared;
 
 namespace SingTray.Service.Services;
 
 public sealed class ImportService
 {
-    private static readonly Regex CoreArchivePattern = new(@"^sing-box-.*-windows-amd64\.zip$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
     private readonly SingBoxManager _singBoxManager;
     private readonly ServiceState _serviceState;
     private readonly LogService _logService;
@@ -69,11 +66,6 @@ public sealed class ImportService
                 throw;
             }
 
-            await _serviceState.UpdateAsync(record =>
-            {
-                record.ConfigName = "config.json";
-                record.LastError = null;
-            }, cancellationToken);
             await _logService.WriteInfoAsync($"Config imported from {importedFileName}.", cancellationToken);
             return OperationResult.Ok("Config imported successfully.");
         }
@@ -94,11 +86,6 @@ public sealed class ImportService
         if (status.SingBoxRunning)
         {
             return OperationResult.Fail("Please stop sing-box first.");
-        }
-
-        if (!CoreArchivePattern.IsMatch(importedFileName))
-        {
-            return OperationResult.Fail("Please choose an official sing-box Windows amd64 zip package.");
         }
 
         var sourceZipPath = GetControlledImportPath(importedFileName);
@@ -151,11 +138,6 @@ public sealed class ImportService
                 throw;
             }
 
-            await _serviceState.UpdateAsync(record =>
-            {
-                record.CoreVersion = validation.Message;
-                record.LastError = null;
-            }, cancellationToken);
             await _logService.WriteInfoAsync($"Core imported from {importedFileName}.", cancellationToken);
             return OperationResult.Ok($"Core imported successfully: {validation.Message}");
         }
