@@ -147,7 +147,7 @@ Key files:
 - `SingTray.Service/PipeServer.cs`
 - `SingTray.Client/TrayApplicationContext.cs`
 - `Installer/setup.iss`
-- `Installer/publish.ps1`
+- `Installer/build-release.ps1`
 
 ## Build
 
@@ -169,39 +169,30 @@ Run the service project in development:
 dotnet run --project .\SingTray.Service\SingTray.Service.csproj
 ```
 
-## Publish
-
-The current publish helper writes client and service outputs separately first, then merges them into a staging directory to avoid output conflicts.
-
-Run:
-
-```powershell
-.\Installer\publish.ps1
-```
-
-Output directories:
-
-- `Installer\artifacts\client\`
-- `Installer\artifacts\service\`
-- `Installer\staging\`
-
-Current publish settings:
-
-- `Release`
-- `win-x64`
-- `self-contained = true`
-
 ## Build The Installer
 
-Run `publish.ps1` first, then compile the installer with Inno Setup:
+Use `build-release.ps1` as the single entry point:
 
 ```powershell
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" .\Installer\setup.iss
+.\Installer\build-release.ps1 -Version v0.1.0 -Mode self-contained
+.\Installer\build-release.ps1 -Version v0.1.0 -Mode framework
 ```
+
+Intermediate directories:
+
+- `Installer\artifacts\self-contained\client\`
+- `Installer\artifacts\self-contained\service\`
+- `Installer\staging\self-contained\client\`
+- `Installer\staging\self-contained\service\`
+- `Installer\artifacts\framework\client\`
+- `Installer\artifacts\framework\service\`
+- `Installer\staging\framework\client\`
+- `Installer\staging\framework\service\`
 
 Output:
 
-- `Installer\output\SingTray-Setup.exe`
+- `Installer\output\self-contained\`
+- `Installer\output\framework\`
 
 ## Development Notes
 

@@ -1,4 +1,4 @@
-# SingTray
+﻿# SingTray
 
 语言：
 
@@ -147,7 +147,7 @@ SingTray.sln
 - `SingTray.Service/PipeServer.cs`
 - `SingTray.Client/TrayApplicationContext.cs`
 - `Installer/setup.iss`
-- `Installer/publish.ps1`
+- `Installer/build-release.ps1`
 
 ## 如何编译
 
@@ -176,7 +176,7 @@ dotnet run --project .\SingTray.Service\SingTray.Service.csproj
 执行：
 
 ```powershell
-.\Installer\publish.ps1
+.\Installer\build-release.ps1 -Version v0.1.0 -Mode self-contained
 ```
 
 生成目录：
@@ -193,15 +193,16 @@ dotnet run --project .\SingTray.Service\SingTray.Service.csproj
 
 ## 如何打包安装器
 
-先执行 `publish.ps1`，再使用 Inno Setup 编译：
+统一使用 `build-release.ps1` 作为唯一入口：
 
 ```powershell
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" .\Installer\setup.iss
+.\Installer\build-release.ps1 -Version v0.1.0 -Mode framework
 ```
 
 输出文件：
 
-- `Installer\output\SingTray-Setup.exe`
+- `Installer\output\self-contained\`
+- `Installer\output\framework\`
 
 ## 开发说明
 
@@ -214,3 +215,5 @@ dotnet run --project .\SingTray.Service\SingTray.Service.csproj
 ## 许可证
 
 本项目采用 MIT License，详见 [LICENSE](LICENSE)。
+
+

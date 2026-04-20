@@ -35,16 +35,16 @@ jobs:
 
       - name: Build self-contained installer
         shell: pwsh
-        run: .\Installer\build-release.ps1 -Version "${{ github.ref_name }}" -SelfContained "true" -ReleaseRoot ".\release"
+        run: .\Installer\build-release.ps1 -Version "${{ github.ref_name }}" -Mode self-contained
 
       - name: Build framework-dependent installer
         shell: pwsh
-        run: .\Installer\build-release.ps1 -Version "${{ github.ref_name }}" -SelfContained "false" -ReleaseRoot ".\release"
+        run: .\Installer\build-release.ps1 -Version "${{ github.ref_name }}" -Mode framework
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            release\self-contained\*.exe
-            release\framework-dependent\*.exe
+            Installer\output\self-contained\*.exe
+            Installer\output\framework\*.exe

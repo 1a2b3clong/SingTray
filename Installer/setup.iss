@@ -2,7 +2,7 @@
 #define MyAppName "SingTray"
 #endif
 #ifndef MyAppVersion
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "1.0"
 #endif
 #ifndef MyAppPublisher
 #define MyAppPublisher "SingTray"
@@ -27,6 +27,15 @@
 #endif
 #ifndef MyOutputBaseFilename
 #define MyOutputBaseFilename "SingTray-Setup"
+#endif
+#ifndef MyStagingDir
+#define MyStagingDir "staging\framework"
+#endif
+#ifndef MyClientStagingDir
+#define MyClientStagingDir AddBackslash(MyStagingDir) + "client"
+#endif
+#ifndef MyServiceStagingDir
+#define MyServiceStagingDir AddBackslash(MyStagingDir) + "service"
 #endif
 
 [Setup]
@@ -56,7 +65,8 @@ WizardSmallImageFile={#MyWizardSmallImage}
 Name: "C:\ProgramData\SingTray"
 
 [Files]
-Source: "staging\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyClientStagingDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyServiceStagingDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SingTray GUI client"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue

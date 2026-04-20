@@ -21,10 +21,7 @@ artifacts/
 # Installer-generated outputs
 Installer/artifacts/
 Installer/output/
-Installer/Output/
 Installer/staging/
-Installer/staging-self-contained/
-Installer/artifacts-self-contained/
 
 # Local app/runtime state that should never be committed
 SingTray.Client/client.log
