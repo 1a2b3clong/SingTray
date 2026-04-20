@@ -13,41 +13,46 @@ SingTray is a Windows desktop controller for `sing-box` built with a clear split
 
 It is designed to be a maintainable desktop application, not a temporary one-process helper tool.
 
-## Features
-
-- Real Windows Service managed by SCM
-- WinForms tray client with single-instance behavior
-- Named Pipe IPC between tray and service
-- Core and config import handled only by the service
-- Separate install directory and data directory
-- Inno Setup based installer
-- Start Menu integration and Windows Search discovery
-- Service auto-start on boot
-- Tray auto-start on user login
-- Runtime state persisted in `state.json`
-- Separate `app.log` and `singbox.log`
-
 ## How To Use
 
-After installation:
+1. Download a Windows x64 `sing-box` core zip from the official repository:
+   `https://github.com/sagernet/sing-box`
+2. Start `SingTray` from the Start Menu, or let it start automatically after login.
+3. Right-click the tray icon and use `Import Core` to import the downloaded zip package directly.
+4. Use `Import Config` to import your `config.json`.
+5. Use the first menu item to switch runtime state:
+   - `SingTray - Stopped` -> Start
+   - `SingTray - Running` -> Stop
+   - `SingTray - Error` -> Start or Restart
+   - `SingTray - Starting` / `SingTray - Stopping` -> disabled
+6. Use `Exit` when you want to close the tray app. The client records whether `sing-box` was running, and on the next tray startup it tries to restore that previous state once.
 
-1. Start `SingTray` from the Start Menu, or let it start automatically after login.
-2. Right-click the tray icon to open the menu.
-3. Use the top status item to control runtime state:
-   - `Running` -> Stop
-   - `Stopped` -> Start
-   - `Error` -> Start or Restart
-   - `Starting / Stopping` -> disabled
-4. Use `Import Config` to import a JSON config file.
-5. Use `Import Core` to import a `sing-box` zip package.
-6. Use `Open Data Folder` to inspect logs and state files.
+Default behavior:
 
-Fixed behavior:
-
-- The service starts automatically, but `sing-box` does not auto-start by default.
-- Importing core or config does not auto-start or auto-restart `sing-box`.
+- `SingTray.Service` starts automatically with Windows
+- `SingTray.Client` starts automatically after user login
+- `sing-box` does not auto-start on a fresh install until you start it
+- Importing core or config does not auto-start or auto-restart `sing-box`
 - If `sing-box` is running, import is rejected with:
   `Please stop sing-box first.`
+
+## Tray Status
+
+Top runtime state:
+
+- `Running`: `sing-box` is currently running
+- `Stopped`: `sing-box` is currently stopped
+- `Starting`: a start request is in progress
+- `Stopping`: a stop request is in progress
+- `Error`: the last start or runtime attempt failed
+- `Unavailable`: the tray client cannot reach `SingTray.Service`
+
+Import state hints:
+
+- `Import Config` shows the current config file name when valid
+- `Import Config` may show `Unconfigured`, `Waiting`, or `Error` when config is missing or not ready
+- `Import Core` shows the imported core version when valid
+- `Import Core` may show `Missing` or `Error` when the core is missing or invalid
 
 ## Installation Paths
 
