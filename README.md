@@ -36,6 +36,16 @@ Default behavior:
 - If `sing-box` is running, import is rejected with:
   `Please stop sing-box first.`
 
+## Screenshots
+
+### Tray Menu
+
+![SingTray tray menu](docs/images/tray-menu.png)
+
+### Data Folder
+
+![SingTray data folder](docs/images/data-folder.png)
+
 ## Tray Status
 
 Top runtime state:
