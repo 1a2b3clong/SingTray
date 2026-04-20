@@ -1,21 +1,44 @@
-$ErrorActionPreference = "Stop"
-
 param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
     [Parameter(Mandatory = $true)]
-    [bool]$SelfContained,
+    [string]$SelfContained,
 
     [string]$Runtime = "win-x64",
     [string]$Configuration = "Release",
     [string]$ReleaseRoot = ""
 )
 
+$ErrorActionPreference = "Stop"
+
+function ConvertTo-Bool([string]$Value)
+{
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "Boolean value is required."
+    }
+
+    switch ($Value.Trim().ToLowerInvariant())
+    {
+        "true" { return $true }
+        "false" { return $false }
+        "1" { return $true }
+        "0" { return $false }
+        default { throw "Invalid boolean value: $Value" }
+    }
+}
+
 $installerRoot = $PSScriptRoot
 $repoRoot = Split-Path -Parent $installerRoot
-$releaseRootPath = if ([string]::IsNullOrWhiteSpace($ReleaseRoot)) { Join-Path $repoRoot "release" } else { $ReleaseRoot }
-$variantName = if ($SelfContained) { "self-contained" } else { "framework-dependent" }
+$releaseRootPath = if ([string]::IsNullOrWhiteSpace($ReleaseRoot)) {
+    Join-Path $repoRoot "release"
+} elseif ([System.IO.Path]::IsPathRooted($ReleaseRoot)) {
+    $ReleaseRoot
+} else {
+    Join-Path $repoRoot $ReleaseRoot
+}
+$selfContainedFlag = ConvertTo-Bool $SelfContained
+$variantName = if ($selfContainedFlag) { "self-contained" } else { "framework-dependent" }
 $artifactsRoot = Join-Path $installerRoot "artifacts-$variantName"
 $stagingRoot = Join-Path $installerRoot "staging-$variantName"
 $outputRoot = Join-Path $releaseRootPath $variantName
