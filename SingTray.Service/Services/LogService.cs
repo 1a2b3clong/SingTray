@@ -21,7 +21,6 @@ public sealed class LogService
     {
         AppPaths.EnsureDataDirectories();
         await File.WriteAllTextAsync(AppPaths.AppLogPath, string.Empty, Encoding.UTF8, cancellationToken);
-        await File.WriteAllTextAsync(AppPaths.SingBoxLogPath, string.Empty, Encoding.UTF8, cancellationToken);
         await WriteAppLogAsync("Service logging initialized.", cancellationToken);
     }
 
@@ -56,6 +55,19 @@ public sealed class LogService
         try
         {
             await File.AppendAllTextAsync(AppPaths.SingBoxLogPath, entry, Encoding.UTF8, cancellationToken);
+        }
+        finally
+        {
+            _singBoxLogLock.Release();
+        }
+    }
+
+    public async Task ResetSingBoxLogAsync(CancellationToken cancellationToken)
+    {
+        await _singBoxLogLock.WaitAsync(cancellationToken);
+        try
+        {
+            await File.WriteAllTextAsync(AppPaths.SingBoxLogPath, string.Empty, Encoding.UTF8, cancellationToken);
         }
         finally
         {

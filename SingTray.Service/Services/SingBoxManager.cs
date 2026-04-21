@@ -114,6 +114,7 @@ public sealed class SingBoxManager
 
             _lastStdErrLine = null;
             Interlocked.Exchange(ref _fatalKillTriggered, 0);
+            await _logService.ResetSingBoxLogAsync(cancellationToken);
             var process = BuildProcess(AppPaths.SingBoxExecutablePath, SingBoxConstants.RunArguments, AppPaths.CoreDirectory);
             process.EnableRaisingEvents = true;
             process.OutputDataReceived += (_, args) =>

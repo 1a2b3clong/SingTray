@@ -2,7 +2,7 @@ param(
     [string]$Version = "local",
 
     [ValidateSet("framework", "self-contained")]
-    [string]$Mode = "self-contained",
+    [string]$Mode = "framework",
 
     [string]$Runtime = "win-x64",
     [string]$Configuration = "Release"
