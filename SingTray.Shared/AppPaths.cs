@@ -20,6 +20,7 @@ public static class AppPaths
     public static string AppLogPath => Path.Combine(LogsDirectory, "app.log");
     public static string SingBoxLogPath => Path.Combine(LogsDirectory, "singbox.log");
     public static string ServiceStatePath => Path.Combine(StateDirectory, "state.json");
+    public static string LogSessionStatePath => Path.Combine(StateDirectory, "log-session.json");
 
     public static string ClientStateDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
