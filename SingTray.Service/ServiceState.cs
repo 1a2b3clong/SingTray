@@ -10,6 +10,7 @@ public sealed class ServiceState
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly LogService _logService;
+    private TaskCompletionSource _changeSignal = CreateChangeSignal();
     private ServiceStateRecord _record = new();
 
     public ServiceState(LogService logService)
@@ -52,20 +53,30 @@ public sealed class ServiceState
     {
         RunState previousState;
         RunState currentState;
+        TaskCompletionSource? completedSignal = null;
 
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var previousRecord = Clone(_record);
             previousState = _record.RunState;
             updater(_record);
             currentState = _record.RunState;
-            _record.UpdatedAt = DateTimeOffset.UtcNow;
-            await PersistCoreAsync(cancellationToken);
+            if (HasMeaningfulChange(previousRecord, _record))
+            {
+                _record.UpdatedAt = DateTimeOffset.UtcNow;
+                _record.StateRevision++;
+                await PersistCoreAsync(cancellationToken);
+                completedSignal = _changeSignal;
+                _changeSignal = CreateChangeSignal();
+            }
         }
         finally
         {
             _gate.Release();
         }
+
+        completedSignal?.TrySetResult();
 
         if (previousState != currentState)
         {
@@ -73,9 +84,46 @@ public sealed class ServiceState
         }
     }
 
+    public async Task<StatusInfo> WaitForStatusChangeAsync(long lastSeenRevision, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task waitTask;
+            ServiceStateRecord currentRecord;
+
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                currentRecord = Clone(_record);
+                if (currentRecord.StateRevision != lastSeenRevision)
+                {
+                    return CreateStatusSnapshot(currentRecord);
+                }
+
+                waitTask = _changeSignal.Task;
+            }
+            finally
+            {
+                _gate.Release();
+            }
+
+            var timeoutTask = Task.Delay(timeout, cancellationToken);
+            var completedTask = await Task.WhenAny(waitTask, timeoutTask);
+            if (completedTask == timeoutTask)
+            {
+                return await CreateStatusSnapshotAsync(cancellationToken);
+            }
+        }
+    }
+
     public async Task<StatusInfo> CreateStatusSnapshotAsync(CancellationToken cancellationToken)
     {
         var record = await GetRecordAsync(cancellationToken);
+        return CreateStatusSnapshot(record);
+    }
+
+    private static StatusInfo CreateStatusSnapshot(ServiceStateRecord record)
+    {
         return new StatusInfo
         {
             ServiceAvailable = true,
@@ -99,7 +147,8 @@ public sealed class ServiceState
                 ValidationMessage = record.ConfigValidationMessage
             },
             Paths = new PathInfo(),
-            Timestamp = DateTimeOffset.UtcNow
+            Timestamp = record.UpdatedAt,
+            StateRevision = record.StateRevision
         };
     }
 
@@ -139,7 +188,29 @@ public sealed class ServiceState
             ConfigValid = source.ConfigValid,
             ConfigName = source.ConfigName,
             ConfigValidationMessage = source.ConfigValidationMessage,
-            UpdatedAt = source.UpdatedAt
+            UpdatedAt = source.UpdatedAt,
+            StateRevision = source.StateRevision
         };
+    }
+
+    private static bool HasMeaningfulChange(ServiceStateRecord previous, ServiceStateRecord current)
+    {
+        return previous.RunState != current.RunState
+            || previous.SingBoxPid != current.SingBoxPid
+            || previous.LastError != current.LastError
+            || previous.ExitStatus != current.ExitStatus
+            || previous.CoreInstalled != current.CoreInstalled
+            || previous.CoreValid != current.CoreValid
+            || previous.CoreVersion != current.CoreVersion
+            || previous.CoreValidationMessage != current.CoreValidationMessage
+            || previous.ConfigInstalled != current.ConfigInstalled
+            || previous.ConfigValid != current.ConfigValid
+            || previous.ConfigName != current.ConfigName
+            || previous.ConfigValidationMessage != current.ConfigValidationMessage;
+    }
+
+    private static TaskCompletionSource CreateChangeSignal()
+    {
+        return new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }

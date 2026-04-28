@@ -46,8 +46,19 @@ public sealed class SingBoxManager
             : new CoreInfo { Installed = true, Valid = false, ValidationMessage = versionResult.Message };
     }
 
-    public Task<ConfigInfo> GetConfigInfoAsync(CancellationToken cancellationToken) =>
-        ValidateConfigFileAsync(AppPaths.ActiveConfigPath, cancellationToken);
+    public async Task<ConfigInfo> GetConfigInfoAsync(CancellationToken cancellationToken)
+    {
+        var configPath = await GetActiveConfigPathAsync(cancellationToken);
+        return await ValidateConfigFileAsync(configPath, cancellationToken);
+    }
+
+    public async Task<string> GetActiveConfigPathAsync(CancellationToken cancellationToken)
+    {
+        var record = await _serviceState.GetRecordAsync(cancellationToken);
+        return string.IsNullOrWhiteSpace(record.ConfigName)
+            ? AppPaths.ActiveConfigPath
+            : AppPaths.GetConfigPath(record.ConfigName);
+    }
 
     public Task<ConfigInfo> ValidateConfigFileAsync(string configPath, CancellationToken cancellationToken) =>
         ValidateConfigPathAsync(configPath, cancellationToken);
@@ -84,6 +95,7 @@ public sealed class SingBoxManager
                 return OperationResult.Ok("sing-box is already running.");
             }
 
+            var activeConfigPath = await GetActiveConfigPathAsync(cancellationToken);
             var (core, config) = await RefreshComponentStateAsync(cancellationToken);
 
             if (!core.Installed)
@@ -106,6 +118,8 @@ public sealed class SingBoxManager
                 return await FailStartAsync(config.ValidationMessage ?? "Config invalid", cancellationToken);
             }
 
+            await _logService.ResetSingBoxLogAsync(cancellationToken);
+
             await _serviceState.UpdateAsync(record =>
             {
                 record.RunState = RunState.Starting;
@@ -114,7 +128,7 @@ public sealed class SingBoxManager
 
             _lastStdErrLine = null;
             Interlocked.Exchange(ref _fatalKillTriggered, 0);
-            var process = BuildProcess(AppPaths.SingBoxExecutablePath, SingBoxConstants.RunArguments, AppPaths.CoreDirectory);
+            var process = BuildProcess(AppPaths.SingBoxExecutablePath, SingBoxConstants.BuildRunArguments(activeConfigPath), AppPaths.CoreDirectory);
             process.EnableRaisingEvents = true;
             process.OutputDataReceived += (_, args) =>
             {
@@ -130,7 +144,7 @@ public sealed class SingBoxManager
                     var cleaned = StripAnsi(args.Data);
                     _lastStdErrLine = cleaned;
                     _ = _logService.WriteSingBoxOutputAsync("stderr", cleaned, CancellationToken.None);
-                    if (cleaned.Contains("FATAL[0009]", StringComparison.OrdinalIgnoreCase))
+                    if (cleaned.Contains("FATAL", StringComparison.OrdinalIgnoreCase))
                     {
                         _ = ForceKillOnFatalAsync(process, cleaned);
                     }
@@ -146,8 +160,6 @@ public sealed class SingBoxManager
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             _currentProcess = process;
-
-            await Task.Delay(SingBoxConstants.StartProbeDelayMilliseconds, cancellationToken);
 
             if (!IsProcessAlive(process))
             {
@@ -200,19 +212,14 @@ public sealed class SingBoxManager
             await _logService.WriteInfoAsync($"Stopping sing-box PID {pid}.", cancellationToken);
             _stopRequested = true;
 
-            if (TryGetMainWindowHandle(trackedProcess) != IntPtr.Zero)
+            await ForceTerminateProcessAsync(trackedProcess, "stop request", cancellationToken);
+
+            if (IsProcessAlive(trackedProcess))
             {
-                TryCloseMainWindow(trackedProcess);
+                return OperationResult.Fail("Failed to stop sing-box.");
             }
 
-            if (!await WaitForExitAsync(trackedProcess, SingBoxConstants.StopTimeoutMilliseconds, cancellationToken))
-            {
-                await ForceTerminateProcessAsync(trackedProcess, "stop request timeout", cancellationToken);
-                if (IsProcessAlive(trackedProcess))
-                {
-                    return OperationResult.Fail("Failed to stop sing-box within timeout.");
-                }
-            }
+            await _logService.FlushSingBoxLogAsync(cancellationToken);
 
             await _serviceState.UpdateAsync(record =>
             {
@@ -337,6 +344,20 @@ public sealed class SingBoxManager
         return await _serviceState.CreateStatusSnapshotAsync(cancellationToken);
     }
 
+    public async Task<StatusInfo> WaitForStatusChangeAsync(long? lastSeenRevision, CancellationToken cancellationToken)
+    {
+        var currentStatus = await GetStatusAsync(cancellationToken);
+        if (lastSeenRevision is null || currentStatus.StateRevision != lastSeenRevision.Value)
+        {
+            return currentStatus;
+        }
+
+        return await _serviceState.WaitForStatusChangeAsync(
+            lastSeenRevision.Value,
+            TimeSpan.FromMilliseconds(SingBoxConstants.StatusWaitTimeoutMilliseconds),
+            cancellationToken);
+    }
+
     private async Task<OperationResult> GetVersionFromExecutableAsync(string executablePath, CancellationToken cancellationToken)
     {
         var result = await RunProcessCaptureAsync(executablePath, SingBoxConstants.VersionArguments, Path.GetDirectoryName(executablePath)!, cancellationToken);
@@ -429,6 +450,7 @@ public sealed class SingBoxManager
         var exitStatus = BuildExitStatus(exitCode);
 
         await _logService.WriteInfoAsync($"sing-box exited with code {exitCode}.", CancellationToken.None);
+        await _logService.FlushSingBoxLogAsync(CancellationToken.None);
         await _serviceState.UpdateAsync(record =>
         {
             record.SingBoxPid = null;
@@ -730,29 +752,6 @@ public sealed class SingBoxManager
         {
             pid = 0;
             return false;
-        }
-    }
-
-    private static IntPtr TryGetMainWindowHandle(Process process)
-    {
-        try
-        {
-            return process.MainWindowHandle;
-        }
-        catch (InvalidOperationException)
-        {
-            return IntPtr.Zero;
-        }
-    }
-
-    private static void TryCloseMainWindow(Process process)
-    {
-        try
-        {
-            process.CloseMainWindow();
-        }
-        catch (InvalidOperationException)
-        {
         }
     }
 

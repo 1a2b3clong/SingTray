@@ -13,7 +13,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly FileImportService _fileImportService;
     private readonly DesiredStateStore _desiredStateStore;
     private readonly ClientLogService _clientLogService;
-    private readonly StatusPoller _statusPoller;
+    private readonly StatusWatcher _statusWatcher;
     private readonly NotifyIcon _notifyIcon;
     private readonly TrayMenuBuilder _menuBuilder;
     private readonly ContextMenuStrip _menu;
@@ -31,8 +31,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         _fileImportService = fileImportService;
         _desiredStateStore = desiredStateStore;
         _clientLogService = clientLogService;
-        _statusPoller = new StatusPoller(pipeClient);
-        _statusPoller.StatusUpdated += (_, status) =>
+        _statusWatcher = new StatusWatcher(pipeClient);
+        _statusWatcher.StatusUpdated += (_, status) =>
         {
             if (_isExiting)
             {
@@ -43,7 +43,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             _lastConnectionFailure = null;
             RefreshUi(serviceAvailable: true);
         };
-        _statusPoller.PollFailed += async (_, ex) =>
+        _statusWatcher.WatchFailed += async (_, ex) =>
         {
             if (_isExiting && IsExpectedExitException(ex))
             {
@@ -77,8 +77,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private async Task InitializeAsync()
     {
         await RunConnectionSelfTestAsync();
-        await _statusPoller.PollNowAsync();
-        _statusPoller.Start();
+        await _statusWatcher.RefreshNowAsync();
+        _statusWatcher.Start();
         await CoordinateDesiredStateAsync();
     }
 
@@ -110,7 +110,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             if (shouldBeRunning && !_lastStatus.SingBoxRunning)
             {
                 await ExecuteOperationAsync(() => _pipeClient.StartAsync(BuildStartRequest(), CancellationToken.None), showMessageOnSuccess: false);
-                await _statusPoller.PollNowAsync();
+                await _statusWatcher.RefreshNowAsync();
             }
             else if (!shouldBeRunning && _lastStatus.SingBoxRunning)
             {
@@ -118,7 +118,7 @@ public sealed class TrayApplicationContext : ApplicationContext
                     () => _pipeClient.StopAsync(CancellationToken.None),
                     showMessageOnSuccess: false,
                     suppressExpectedStopErrors: true);
-                await _statusPoller.PollNowAsync();
+                await _statusWatcher.RefreshNowAsync();
             }
         }
         catch
@@ -155,30 +155,43 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (_lastStatus.RunState == RunState.Running)
         {
             await _desiredStateStore.WriteAsync(false);
-            await ExecuteOperationAsync(
+            ApplyLocalRunState(RunState.Stopping);
+            var stopped = await ExecuteOperationAsync(
                 () => _pipeClient.StopAsync(CancellationToken.None),
                 showMessageOnSuccess: false,
                 suppressExpectedStopErrors: true);
+            if (stopped)
+            {
+                ApplyLocalRunState(RunState.Stopped);
+            }
         }
         else if (_lastStatus.RunState == RunState.Error)
         {
+            var restartRequired = _lastStatus.SingBoxRunning;
+            var startRequest = BuildStartRequest();
             await _desiredStateStore.WriteAsync(true);
-            if (_lastStatus.SingBoxRunning)
+            ApplyLocalRunState(RunState.Starting);
+            var started = restartRequired
+                ? await ExecuteOperationAsync(() => _pipeClient.RestartAsync(startRequest, CancellationToken.None))
+                : await ExecuteOperationAsync(() => _pipeClient.StartAsync(startRequest, CancellationToken.None));
+            if (started)
             {
-                await ExecuteOperationAsync(() => _pipeClient.RestartAsync(BuildStartRequest(), CancellationToken.None));
-            }
-            else
-            {
-                await ExecuteOperationAsync(() => _pipeClient.StartAsync(BuildStartRequest(), CancellationToken.None));
+                ApplyLocalRunState(RunState.Running);
             }
         }
         else
         {
+            var startRequest = BuildStartRequest();
             await _desiredStateStore.WriteAsync(true);
-            await ExecuteOperationAsync(() => _pipeClient.StartAsync(BuildStartRequest(), CancellationToken.None));
+            ApplyLocalRunState(RunState.Starting);
+            var started = await ExecuteOperationAsync(() => _pipeClient.StartAsync(startRequest, CancellationToken.None));
+            if (started)
+            {
+                ApplyLocalRunState(RunState.Running);
+            }
         }
 
-        await _statusPoller.PollNowAsync();
+        await _statusWatcher.RefreshNowAsync();
     }
 
     private async void OnImportConfigRequested(object? sender, EventArgs e)
@@ -200,20 +213,26 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
+        string? importedName = null;
         try
         {
-            var importedName = await _fileImportService.PrepareImportAsync(dialog.FileName, CancellationToken.None);
+            importedName = await _fileImportService.PrepareImportAsync(dialog.FileName, CancellationToken.None);
             if (importedName is null)
             {
                 return;
             }
 
             await ExecuteOperationAsync(() => _pipeClient.ImportConfigAsync(importedName, CancellationToken.None));
-            await _statusPoller.PollNowAsync();
+            await _statusWatcher.RefreshNowAsync();
         }
         catch (Exception ex)
         {
             ShowError(ex.Message);
+        }
+        finally
+        {
+            _fileImportService.DeletePreparedImport(importedName);
+            _fileImportService.CleanupPreparedImports();
         }
     }
 
@@ -236,20 +255,26 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
+        string? importedName = null;
         try
         {
-            var importedName = await _fileImportService.PrepareImportAsync(dialog.FileName, CancellationToken.None);
+            importedName = await _fileImportService.PrepareImportAsync(dialog.FileName, CancellationToken.None);
             if (importedName is null)
             {
                 return;
             }
 
             await ExecuteOperationAsync(() => _pipeClient.ImportCoreAsync(importedName, CancellationToken.None));
-            await _statusPoller.PollNowAsync();
+            await _statusWatcher.RefreshNowAsync();
         }
         catch (Exception ex)
         {
             ShowError(ex.Message);
+        }
+        finally
+        {
+            _fileImportService.DeletePreparedImport(importedName);
+            _fileImportService.CleanupPreparedImports();
         }
     }
 
@@ -270,7 +295,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         _isExiting = true;
-        _statusPoller.Stop();
+        _statusWatcher.Stop();
 
         var shouldRestore = _lastStatus?.SingBoxRunning ?? false;
         await _desiredStateStore.WriteAsync(shouldRestore);
@@ -292,7 +317,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
-        _statusPoller.Stop();
+        _statusWatcher.Stop();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _menu.Dispose();
@@ -302,7 +327,29 @@ public sealed class TrayApplicationContext : ApplicationContext
         base.ExitThreadCore();
     }
 
-    private async Task ExecuteOperationAsync(
+    private void ApplyLocalRunState(RunState runState)
+    {
+        if (_lastStatus is null)
+        {
+            return;
+        }
+
+        _lastStatus.RunState = runState;
+        _lastStatus.SingBoxRunning = runState is RunState.Running or RunState.Starting;
+        if (runState == RunState.Stopped)
+        {
+            _lastStatus.SingBoxPid = null;
+        }
+
+        if (runState is RunState.Starting or RunState.Running or RunState.Stopping or RunState.Stopped)
+        {
+            _lastStatus.LastError = null;
+        }
+
+        RefreshUi(serviceAvailable: true);
+    }
+
+    private async Task<bool> ExecuteOperationAsync(
         Func<Task<OperationResult>> action,
         bool showMessageOnSuccess = true,
         bool suppressExpectedExitErrors = false,
@@ -310,7 +357,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         if (_isBusy)
         {
-            return;
+            return false;
         }
 
         _isBusy = true;
@@ -322,34 +369,37 @@ public sealed class TrayApplicationContext : ApplicationContext
                 if (suppressExpectedExitErrors && _isExiting)
                 {
                     await _clientLogService.WriteWarningAsync($"Suppressed exit-time service error: {result.Message}");
-                    return;
+                    return true;
                 }
 
                 if (suppressExpectedStopErrors && IsExpectedStopMessage(result.Message))
                 {
                     await _clientLogService.WriteInfoAsync($"Suppressed expected stop-time service error: {result.Message}");
-                    return;
+                    return true;
                 }
 
                 ShowError(result.Message);
-                return;
+                return false;
             }
+
+            return true;
         }
         catch (Exception ex)
         {
             if (suppressExpectedExitErrors && _isExiting && IsExpectedExitException(ex))
             {
                 await _clientLogService.WriteInfoAsync($"Suppressed expected exit-time exception: {ex.Message}");
-                return;
+                return true;
             }
 
             if (suppressExpectedStopErrors && IsExpectedStopException(ex))
             {
                 await _clientLogService.WriteInfoAsync($"Suppressed expected stop-time exception: {ex.Message}");
-                return;
+                return true;
             }
 
             ShowError(ex.Message);
+            return false;
         }
         finally
         {

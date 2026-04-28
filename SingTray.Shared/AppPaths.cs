@@ -15,18 +15,30 @@ public static class AppPaths
     public static string ImportsDirectory => Path.Combine(TempDirectory, "imports");
     public static string StateDirectory => Path.Combine(ProgramDataRoot, "state");
 
+    public const string DefaultConfigFileName = "config.json";
+
     public static string SingBoxExecutablePath => Path.Combine(CoreDirectory, "sing-box.exe");
-    public static string ActiveConfigPath => Path.Combine(ConfigDirectory, "config.json");
+    public static string ActiveConfigPath => GetConfigPath(DefaultConfigFileName);
     public static string AppLogPath => Path.Combine(LogsDirectory, "app.log");
     public static string SingBoxLogPath => Path.Combine(LogsDirectory, "singbox.log");
     public static string ServiceStatePath => Path.Combine(StateDirectory, "state.json");
-    public static string LogSessionStatePath => Path.Combine(StateDirectory, "log-session.json");
 
     public static string ClientStateDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
 
     public static string ClientDesiredStatePath => Path.Combine(ClientStateDirectory, "desired-state.json");
     public static string ClientLogPath => Path.Combine(ClientStateDirectory, "client.log");
+
+    public static string GetConfigPath(string fileName)
+    {
+        var safeName = Path.GetFileName(fileName);
+        if (string.IsNullOrWhiteSpace(safeName))
+        {
+            throw new InvalidOperationException("Config file name is required.");
+        }
+
+        return Path.Combine(ConfigDirectory, safeName);
+    }
 
     public static IReadOnlyList<string> AllDataDirectories { get; } =
     [

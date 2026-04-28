@@ -16,6 +16,16 @@ public sealed class PipeClient : IDisposable
     public Task<StatusInfo> GetStatusAsync(CancellationToken cancellationToken) =>
         SendForDataAsync<StatusInfo>(new PipeRequest { Action = "get_status" }, SingBoxConstants.PipeTimeoutMilliseconds, cancellationToken);
 
+    public Task<StatusInfo> WaitStatusChangeAsync(long? lastSeenRevision, CancellationToken cancellationToken) =>
+        SendForDataAsync<StatusInfo>(
+            new PipeRequest
+            {
+                Action = "wait_status_change",
+                Payload = JsonSerializer.SerializeToElement(new StatusChangeRequest { LastSeenRevision = lastSeenRevision }, PipeContracts.JsonOptions)
+            },
+            SingBoxConstants.PipeStatusWaitTimeoutMilliseconds,
+            cancellationToken);
+
     public Task<OperationResult> StartAsync(StartRequest request, CancellationToken cancellationToken) =>
         SendForDataAsync<OperationResult>(
             new PipeRequest { Action = "start", Payload = JsonSerializer.SerializeToElement(request, PipeContracts.JsonOptions) },

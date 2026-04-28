@@ -17,4 +17,5 @@ public sealed class ServiceStateRecord
     public string? ConfigName { get; set; }
     public string? ConfigValidationMessage { get; set; }
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public long StateRevision { get; set; }
 }

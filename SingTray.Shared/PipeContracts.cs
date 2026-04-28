@@ -51,6 +51,11 @@ public sealed class ImportRequest
     public string ImportedFileName { get; set; } = string.Empty;
 }
 
+public sealed class StatusChangeRequest
+{
+    public long? LastSeenRevision { get; set; }
+}
+
 public sealed class StartRequest
 {
     public string? LastError { get; set; }

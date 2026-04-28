@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using SingTray.Shared;
+using SingTray.Shared.Models;
 
 namespace SingTray.Service.Services;
 
@@ -18,21 +19,25 @@ public sealed class ImportService
 
     public async Task<OperationResult> ImportConfigAsync(string importedFileName, CancellationToken cancellationToken)
     {
-        var status = await _singBoxManager.GetStatusAsync(cancellationToken);
-        if (status.SingBoxRunning)
-        {
-            return OperationResult.Fail("Please stop sing-box first.");
-        }
-
-        var sourcePath = GetControlledImportPath(importedFileName);
-        if (!File.Exists(sourcePath))
-        {
-            return OperationResult.Fail("Imported config file not found.");
-        }
-
+        var importedConfigName = Path.GetFileName(importedFileName);
+        var sourcePath = GetControlledImportPath(importedConfigName);
         var validationCopyPath = Path.Combine(AppPaths.TempDirectory, $"config-validation-{Guid.NewGuid():N}.json");
+        var destinationPath = AppPaths.GetConfigPath(importedConfigName);
+        var backupPath = Path.Combine(AppPaths.TempDirectory, $"config-backup-{Guid.NewGuid():N}.json");
+        var movedNewConfig = false;
         try
         {
+            var status = await _singBoxManager.GetStatusAsync(cancellationToken);
+            if (status.SingBoxRunning)
+            {
+                return OperationResult.Fail("Please stop sing-box first.");
+            }
+
+            if (!File.Exists(sourcePath))
+            {
+                return OperationResult.Fail("Imported config file not found.");
+            }
+
             File.Copy(sourcePath, validationCopyPath, overwrite: true);
             var tempValidation = await ValidateConfigAsync(validationCopyPath, cancellationToken);
             if (!tempValidation.Success)
@@ -43,25 +48,37 @@ public sealed class ImportService
             }
 
             Directory.CreateDirectory(AppPaths.ConfigDirectory);
-            var backupPath = Path.Combine(AppPaths.TempDirectory, $"config-backup-{Guid.NewGuid():N}.json");
-            if (File.Exists(AppPaths.ActiveConfigPath))
+            var previousConfigPath = await _singBoxManager.GetActiveConfigPathAsync(cancellationToken);
+            var replacingSameFile = PathsEqual(previousConfigPath, destinationPath);
+
+            if (File.Exists(destinationPath))
             {
-                File.Move(AppPaths.ActiveConfigPath, backupPath, overwrite: true);
+                File.Move(destinationPath, backupPath, overwrite: true);
             }
 
             try
             {
-                File.Move(validationCopyPath, AppPaths.ActiveConfigPath, overwrite: true);
-                if (File.Exists(backupPath))
+                File.Move(validationCopyPath, destinationPath, overwrite: true);
+                movedNewConfig = true;
+                await RefreshConfigStateAsync(destinationPath, cancellationToken);
+
+                if (!replacingSameFile)
                 {
-                    File.Delete(backupPath);
+                    TryDeleteFile(previousConfigPath);
                 }
+
+                TryDeleteFile(backupPath);
             }
             catch
             {
+                if (movedNewConfig)
+                {
+                    TryDeleteFile(destinationPath);
+                }
+
                 if (File.Exists(backupPath))
                 {
-                    File.Move(backupPath, AppPaths.ActiveConfigPath, overwrite: true);
+                    File.Move(backupPath, destinationPath, overwrite: true);
                 }
 
                 throw;
@@ -80,29 +97,30 @@ public sealed class ImportService
         finally
         {
             TryDeleteFile(validationCopyPath);
+            await CleanupImportsDirectoryAsync(cancellationToken);
         }
     }
 
     public async Task<OperationResult> ImportCoreAsync(string importedFileName, CancellationToken cancellationToken)
     {
-        var status = await _singBoxManager.GetStatusAsync(cancellationToken);
-        if (status.SingBoxRunning)
-        {
-            return OperationResult.Fail("Please stop sing-box first.");
-        }
-
         var sourceZipPath = GetControlledImportPath(importedFileName);
-        if (!File.Exists(sourceZipPath))
-        {
-            return OperationResult.Fail("Imported core archive not found.");
-        }
-
         var extractRoot = Path.Combine(AppPaths.TempDirectory, $"core-import-{Guid.NewGuid():N}");
         var stagedCoreRoot = Path.Combine(AppPaths.TempDirectory, $"core-staged-{Guid.NewGuid():N}");
         var backupRoot = Path.Combine(AppPaths.TempDirectory, $"core-backup-{Guid.NewGuid():N}");
 
         try
         {
+            var status = await _singBoxManager.GetStatusAsync(cancellationToken);
+            if (status.SingBoxRunning)
+            {
+                return OperationResult.Fail("Please stop sing-box first.");
+            }
+
+            if (!File.Exists(sourceZipPath))
+            {
+                return OperationResult.Fail("Imported core archive not found.");
+            }
+
             Directory.CreateDirectory(extractRoot);
             ZipFile.ExtractToDirectory(sourceZipPath, extractRoot);
 
@@ -155,6 +173,7 @@ public sealed class ImportService
         }
         finally
         {
+            await CleanupImportsDirectoryAsync(cancellationToken);
             TryDeleteDirectory(extractRoot);
             TryDeleteDirectory(stagedCoreRoot);
         }
@@ -163,6 +182,17 @@ public sealed class ImportService
     private async Task RefreshConfigStateAsync(CancellationToken cancellationToken)
     {
         var config = await _singBoxManager.GetConfigInfoAsync(cancellationToken);
+        await UpdateConfigStateAsync(config, cancellationToken);
+    }
+
+    private async Task RefreshConfigStateAsync(string configPath, CancellationToken cancellationToken)
+    {
+        var config = await _singBoxManager.ValidateConfigFileAsync(configPath, cancellationToken);
+        await UpdateConfigStateAsync(config, cancellationToken);
+    }
+
+    private async Task UpdateConfigStateAsync(ConfigInfo config, CancellationToken cancellationToken)
+    {
         await _serviceState.UpdateAsync(record =>
         {
             record.ConfigInstalled = config.Installed;
@@ -218,6 +248,14 @@ public sealed class ImportService
         return Path.Combine(AppPaths.ImportsDirectory, safeName);
     }
 
+    private static bool PathsEqual(string left, string right)
+    {
+        return string.Equals(
+            Path.GetFullPath(left),
+            Path.GetFullPath(right),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     private static void CopyDirectory(string sourceDirectory, string destinationDirectory)
     {
         Directory.CreateDirectory(destinationDirectory);
@@ -235,33 +273,94 @@ public sealed class ImportService
         }
     }
 
-    private static void TryDeleteFile(string path)
+    private static bool TryDeleteFile(string path)
     {
         try
         {
             if (File.Exists(path))
             {
+                File.SetAttributes(path, FileAttributes.Normal);
                 File.Delete(path);
             }
+
+            return true;
         }
         catch
         {
             // Best effort cleanup.
+            return false;
         }
     }
 
-    private static void TryDeleteDirectory(string path)
+    private async Task CleanupImportsDirectoryAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppPaths.ImportsDirectory);
+            var deletedFiles = 0;
+            var failedFiles = 0;
+            var deletedDirectories = 0;
+            var failedDirectories = 0;
+
+            foreach (var filePath in Directory.GetFiles(AppPaths.ImportsDirectory))
+            {
+                if (!TryDeleteFile(filePath))
+                {
+                    failedFiles++;
+                    await _logService.WriteWarningAsync($"Failed to delete import temp file: {filePath}", cancellationToken);
+                }
+                else
+                {
+                    deletedFiles++;
+                }
+            }
+
+            foreach (var directoryPath in Directory.GetDirectories(AppPaths.ImportsDirectory))
+            {
+                if (!TryDeleteDirectory(directoryPath))
+                {
+                    failedDirectories++;
+                    await _logService.WriteWarningAsync($"Failed to delete import temp directory: {directoryPath}", cancellationToken);
+                }
+                else
+                {
+                    deletedDirectories++;
+                }
+            }
+
+            if (deletedFiles > 0 || deletedDirectories > 0 || failedFiles > 0 || failedDirectories > 0)
+            {
+                await _logService.WriteInfoAsync(
+                    $"Imports cleanup completed. DeletedFiles={deletedFiles}, DeletedDirectories={deletedDirectories}, FailedFiles={failedFiles}, FailedDirectories={failedDirectories}.",
+                    cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            await _logService.WriteWarningAsync($"Failed to clean imports directory: {ex.Message}", cancellationToken);
+        }
+    }
+
+    private static bool TryDeleteDirectory(string path)
     {
         try
         {
             if (Directory.Exists(path))
             {
+                foreach (var filePath in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
+                {
+                    File.SetAttributes(filePath, FileAttributes.Normal);
+                }
+
                 Directory.Delete(path, recursive: true);
             }
+
+            return true;
         }
         catch
         {
             // Best effort cleanup.
+            return false;
         }
     }
 }

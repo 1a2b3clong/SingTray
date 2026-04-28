@@ -25,6 +25,7 @@ public sealed class PipeCommandHandler
             {
                 "ping" => PipeResponse.FromSuccess(new PingInfo()),
                 "get_status" => PipeResponse.FromSuccess(await _singBoxManager.GetStatusAsync(cancellationToken)),
+                "wait_status_change" => PipeResponse.FromSuccess(await HandleWaitStatusChangeAsync(request, cancellationToken)),
                 "start" => ToResponse(await HandleStartAsync(request, cancellationToken)),
                 "stop" => ToResponse(await HandleStopAsync(cancellationToken)),
                 "restart" => ToResponse(await HandleRestartAsync(request, cancellationToken)),
@@ -45,6 +46,11 @@ public sealed class PipeCommandHandler
     {
         await _logService.WriteInfoAsync("Start requested.", cancellationToken);
         return await _singBoxManager.StartAsync(ReadStartRequest(request), cancellationToken);
+    }
+
+    private async Task<StatusInfo> HandleWaitStatusChangeAsync(PipeRequest request, CancellationToken cancellationToken)
+    {
+        return await _singBoxManager.WaitForStatusChangeAsync(ReadStatusChangeRequest(request).LastSeenRevision, cancellationToken);
     }
 
     private async Task<OperationResult> HandleStopAsync(CancellationToken cancellationToken)
@@ -86,6 +92,17 @@ public sealed class PipeCommandHandler
 
         return JsonSerializer.Deserialize<ImportRequest>(request.Payload.Value.GetRawText(), PipeContracts.JsonOptions)
             ?? throw new InvalidOperationException("Import payload is invalid.");
+    }
+
+    private static StatusChangeRequest ReadStatusChangeRequest(PipeRequest request)
+    {
+        if (request.Payload is null)
+        {
+            return new StatusChangeRequest();
+        }
+
+        return JsonSerializer.Deserialize<StatusChangeRequest>(request.Payload.Value.GetRawText(), PipeContracts.JsonOptions)
+            ?? new StatusChangeRequest();
     }
 
     private static StartRequest ReadStartRequest(PipeRequest request)

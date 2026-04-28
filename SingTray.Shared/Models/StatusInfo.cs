@@ -14,4 +14,5 @@ public sealed class StatusInfo
     public string? LastError { get; set; }
     public PathInfo Paths { get; set; } = new();
     public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
+    public long StateRevision { get; set; }
 }

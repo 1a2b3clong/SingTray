@@ -5,11 +5,10 @@ namespace SingTray.Client;
 
 public sealed class TrayMenuBuilder
 {
-    private const int MenuWidth = 280;
-    private const int HeaderHeight = 30;
-    private const int StandardItemHeight = 28;
-
-    private readonly HeaderMenuItem _toggleItem;
+    private readonly ToolStripMenuItem _statusItem;
+    private readonly ToolStripMenuItem _coreStatusItem;
+    private readonly ToolStripMenuItem _configStatusItem;
+    private readonly ToolStripMenuItem _toggleItem;
     private readonly ToolStripMenuItem _importConfigItem;
     private readonly ToolStripMenuItem _importCoreItem;
     private readonly ToolStripMenuItem _openDataFolderItem;
@@ -22,17 +21,14 @@ public sealed class TrayMenuBuilder
         EventHandler openDataFolderHandler,
         EventHandler exitHandler)
     {
-        _toggleItem = new HeaderMenuItem(toggleHandler)
-        {
-            AutoSize = false,
-            Size = new Size(MenuWidth, HeaderHeight),
-            ShowShortcutKeys = true
-        };
-
-        _importConfigItem = CreateStatusItem("Import Config", importConfigHandler);
-        _importCoreItem = CreateStatusItem("Import Core", importCoreHandler);
-        _openDataFolderItem = CreateStandardItem("Open Data Folder", openDataFolderHandler);
-        _exitItem = CreateStandardItem("Exit", exitHandler);
+        _statusItem = CreateInfoItem("Status: Unavailable");
+        _coreStatusItem = CreateInfoItem("Core: Unknown");
+        _configStatusItem = CreateInfoItem("Config: Unknown");
+        _toggleItem = CreateActionItem("Start", toggleHandler);
+        _importConfigItem = CreateActionItem("Import Config...", importConfigHandler);
+        _importCoreItem = CreateActionItem("Import Core...", importCoreHandler);
+        _openDataFolderItem = CreateActionItem("Open Data Folder", openDataFolderHandler);
+        _exitItem = CreateActionItem("Exit", exitHandler);
     }
 
     public ContextMenuStrip Build()
@@ -40,8 +36,14 @@ public sealed class TrayMenuBuilder
         return new ContextMenuStrip
         {
             ShowImageMargin = false,
+            ShowCheckMargin = false,
+            ShowItemToolTips = true,
             Items =
             {
+                _statusItem,
+                _coreStatusItem,
+                _configStatusItem,
+                new ToolStripSeparator(),
                 _toggleItem,
                 new ToolStripSeparator(),
                 _importConfigItem,
@@ -56,61 +58,82 @@ public sealed class TrayMenuBuilder
     {
         if (!serviceAvailable || status is null)
         {
-            _toggleItem.SetState("Unavailable");
+            SetInfoItem(_statusItem, "Status: Unavailable");
+            SetInfoItem(_coreStatusItem, "Core: Unknown");
+            SetInfoItem(_configStatusItem, "Config: Unknown");
+            _toggleItem.Text = "Start";
             _toggleItem.Enabled = false;
-            _toggleItem.Checked = false;
-
-            SetStatusItem(_importConfigItem, "Unavailable", enabled: false);
-            SetStatusItem(_importCoreItem, "Unavailable", enabled: false);
+            _importConfigItem.Enabled = false;
+            _importCoreItem.Enabled = false;
             _openDataFolderItem.Enabled = true;
             return;
         }
 
-        var stateLabel = status.RunState switch
+        var (stateLabel, toggleText, toggleEnabled) = status.RunState switch
         {
-            RunState.Running => "Running",
-            RunState.Stopped => "Stopped",
-            RunState.Starting => "Starting",
-            RunState.Stopping => "Stopping",
-            RunState.Error => "Error",
-            _ => "Unknown"
+            RunState.Running => ("Running", "Stop", true),
+            RunState.Stopped => ("Stopped", "Start", true),
+            RunState.Starting => ("Starting", "Starting...", false),
+            RunState.Stopping => ("Stopping", "Stopping...", false),
+            RunState.Error => ("Error", "Start", true),
+            _ => ("Unavailable", "Start", false)
         };
 
-        _toggleItem.SetState(stateLabel);
-        _toggleItem.Enabled = status.RunState is not RunState.Starting and not RunState.Stopping;
-        _toggleItem.Checked = status.RunState == RunState.Running;
+        SetInfoItem(_statusItem, "Status: " + stateLabel);
 
-        var importEnabled = status.RunState is not RunState.Starting and not RunState.Stopping and not RunState.Running;
-        SetStatusItem(_importConfigItem, BuildConfigStatusLabel(status), enabled: importEnabled);
-        SetStatusItem(_importCoreItem, BuildCoreStatusLabel(status), enabled: importEnabled);
+        var fullCoreText = BuildCoreStatusLabel(status);
+        SetInfoItem(_coreStatusItem, "Core: " + Ellipsize(fullCoreText), "Core: " + fullCoreText);
+
+        var fullConfigText = BuildConfigStatusLabel(status);
+        SetInfoItem(_configStatusItem, "Config: " + Ellipsize(fullConfigText), "Config: " + fullConfigText);
+
+        _toggleItem.Text = toggleText;
+        _toggleItem.Enabled = toggleEnabled;
+
+        var importEnabled = status.RunState is RunState.Stopped or RunState.Error;
+        _importConfigItem.Enabled = importEnabled;
+        _importCoreItem.Enabled = importEnabled;
         _openDataFolderItem.Enabled = true;
     }
 
-    private static ToolStripMenuItem CreateStatusItem(string text, EventHandler clickHandler)
+    private static ToolStripMenuItem CreateInfoItem(string text)
     {
-        return new ToolStripMenuItem(text, null, clickHandler)
+        return new ToolStripMenuItem(text)
         {
-            AutoSize = false,
-            Size = new Size(MenuWidth, StandardItemHeight),
-            TextAlign = ContentAlignment.MiddleLeft,
-            ShowShortcutKeys = true
+            Enabled = false,
+            AutoToolTip = false
         };
     }
 
-    private static ToolStripMenuItem CreateStandardItem(string text, EventHandler clickHandler)
+    private static ToolStripMenuItem CreateActionItem(string text, EventHandler clickHandler)
     {
-        return new ToolStripMenuItem(text, null, clickHandler)
-        {
-            AutoSize = false,
-            Size = new Size(MenuWidth, StandardItemHeight),
-            TextAlign = ContentAlignment.MiddleLeft
-        };
+        return new ToolStripMenuItem(text, null, clickHandler);
     }
 
-    private static void SetStatusItem(ToolStripMenuItem item, string status, bool enabled)
+    private static void SetInfoItem(ToolStripMenuItem item, string text)
     {
-        item.ShortcutKeyDisplayString = status;
-        item.Enabled = enabled;
+        SetInfoItem(item, text, text);
+    }
+
+    private static void SetInfoItem(ToolStripMenuItem item, string text, string tooltipText)
+    {
+        item.Text = text;
+        item.ToolTipText = tooltipText;
+    }
+
+    private static string Ellipsize(string? text, int maxChars = 36)
+    {
+        if (maxChars <= 8)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxChars), "maxChars must be greater than 8.");
+        }
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        return text.Length <= maxChars ? text : text[..(maxChars - 3)] + "...";
     }
 
     private static string BuildConfigStatusLabel(StatusInfo status)
@@ -162,19 +185,5 @@ public sealed class TrayMenuBuilder
         }
 
         return version;
-    }
-}
-
-internal sealed class HeaderMenuItem : ToolStripMenuItem
-{
-    public HeaderMenuItem(EventHandler clickHandler) : base("SingTray", null, clickHandler)
-    {
-        ShortcutKeyDisplayString = "Loading";
-        TextAlign = ContentAlignment.MiddleLeft;
-    }
-
-    public void SetState(string state)
-    {
-        ShortcutKeyDisplayString = state;
     }
 }

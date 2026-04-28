@@ -1,24 +1,22 @@
 using System.Text;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using SingTray.Shared;
 
 namespace SingTray.Service.Services;
 
-public sealed class LogService
+public sealed class LogService : IDisposable, IAsyncDisposable
 {
     private static readonly bool EnableDebugLogging = false;
-    private static readonly TimeSpan BootSessionComparisonTolerance = TimeSpan.FromMinutes(1);
-    private static readonly string[] SuppressedSingBoxCategories =
-    [
-        " connection:",
-        " dns:",
-        " router:"
-    ];
+    private const int SingBoxLogBufferSize = 64 * 1024;
+    private static readonly TimeSpan SingBoxLogFlushInterval = TimeSpan.FromSeconds(30);
 
     private readonly SemaphoreSlim _appLogLock = new(1, 1);
     private readonly SemaphoreSlim _singBoxLogLock = new(1, 1);
     private readonly ILogger<LogService> _logger;
+    private StreamWriter? _singBoxLogWriter;
+    private CancellationTokenSource? _singBoxFlushCts;
+    private Task? _singBoxFlushTask;
+    private bool _disposed;
 
     public LogService(ILogger<LogService> logger)
     {
@@ -28,18 +26,8 @@ public sealed class LogService
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         AppPaths.EnsureDataDirectories();
-
-        var currentBootSessionUtc = GetCurrentBootSessionUtc();
-        var previousBootSessionUtc = await LoadBootSessionUtcAsync(cancellationToken);
-        var shouldResetLogs = previousBootSessionUtc is null ||
-            Math.Abs((currentBootSessionUtc - previousBootSessionUtc.Value).TotalMinutes) > BootSessionComparisonTolerance.TotalMinutes;
-
-        if (shouldResetLogs)
-        {
-            await ResetAllLogsAsync(cancellationToken);
-        }
-
-        await SaveBootSessionUtcAsync(currentBootSessionUtc, cancellationToken);
+        DeleteLegacyLogSessionState();
+        await ResetAppLogAsync(cancellationToken);
         await WriteAppLogAsync("Service logging initialized.", cancellationToken);
     }
 
@@ -69,16 +57,17 @@ public sealed class LogService
 
     public async Task WriteSingBoxOutputAsync(string source, string line, CancellationToken cancellationToken)
     {
-        if (ShouldSuppressSingBoxOutput(source, line))
-        {
-            return;
-        }
-
-        var entry = $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss} [{source}] {line}{Environment.NewLine}";
+        var entry = line + Environment.NewLine;
         await _singBoxLogLock.WaitAsync(cancellationToken);
         try
         {
-            await File.AppendAllTextAsync(AppPaths.SingBoxLogPath, entry, Encoding.UTF8, cancellationToken);
+            if (_disposed)
+            {
+                return;
+            }
+
+            EnsureSingBoxLogWriter(append: true);
+            await _singBoxLogWriter!.WriteAsync(entry.AsMemory(), cancellationToken);
         }
         finally
         {
@@ -86,25 +75,37 @@ public sealed class LogService
         }
     }
 
-    private static bool ShouldSuppressSingBoxOutput(string source, string line)
+    public async Task ResetSingBoxLogAsync(CancellationToken cancellationToken)
     {
-        if (!string.Equals(source, "stderr", StringComparison.OrdinalIgnoreCase))
+        await _singBoxLogLock.WaitAsync(cancellationToken);
+        try
         {
-            return false;
+            await CloseSingBoxLogWriterCoreAsync();
+            EnsureSingBoxLogWriter(append: false);
         }
-
-        foreach (var category in SuppressedSingBoxCategories)
+        finally
         {
-            if (line.Contains(category, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
+            _singBoxLogLock.Release();
         }
-
-        return false;
     }
 
-    private async Task ResetAllLogsAsync(CancellationToken cancellationToken)
+    public async Task FlushSingBoxLogAsync(CancellationToken cancellationToken)
+    {
+        await _singBoxLogLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_singBoxLogWriter is not null)
+            {
+                await _singBoxLogWriter.FlushAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            _singBoxLogLock.Release();
+        }
+    }
+
+    private async Task ResetAppLogAsync(CancellationToken cancellationToken)
     {
         await _appLogLock.WaitAsync(cancellationToken);
         try
@@ -115,44 +116,23 @@ public sealed class LogService
         {
             _appLogLock.Release();
         }
+    }
 
-        await _singBoxLogLock.WaitAsync(cancellationToken);
+    private static void DeleteLegacyLogSessionState()
+    {
         try
         {
-            await File.WriteAllTextAsync(AppPaths.SingBoxLogPath, string.Empty, Encoding.UTF8, cancellationToken);
+            var legacyPath = Path.Combine(AppPaths.StateDirectory, "log-session.json");
+            if (File.Exists(legacyPath))
+            {
+                File.SetAttributes(legacyPath, FileAttributes.Normal);
+                File.Delete(legacyPath);
+            }
         }
-        finally
+        catch
         {
-            _singBoxLogLock.Release();
+            // Best effort cleanup for the old boot-session log state file.
         }
-    }
-
-    private async Task<DateTimeOffset?> LoadBootSessionUtcAsync(CancellationToken cancellationToken)
-    {
-        if (!File.Exists(AppPaths.LogSessionStatePath))
-        {
-            return null;
-        }
-
-        await using var stream = File.OpenRead(AppPaths.LogSessionStatePath);
-        var state = await JsonSerializer.DeserializeAsync<LogSessionState>(stream, cancellationToken: cancellationToken);
-        return state?.BootSessionUtc;
-    }
-
-    private static DateTimeOffset GetCurrentBootSessionUtc()
-    {
-        return DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
-    }
-
-    private async Task SaveBootSessionUtcAsync(DateTimeOffset bootSessionUtc, CancellationToken cancellationToken)
-    {
-        var state = new LogSessionState
-        {
-            BootSessionUtc = bootSessionUtc
-        };
-
-        await using var stream = File.Create(AppPaths.LogSessionStatePath);
-        await JsonSerializer.SerializeAsync(stream, state, cancellationToken: cancellationToken);
     }
 
     private async Task WriteAppLogAsync(string message, CancellationToken cancellationToken) =>
@@ -174,8 +154,129 @@ public sealed class LogService
         }
     }
 
-    private sealed class LogSessionState
+    private void EnsureSingBoxLogWriter(bool append)
     {
-        public DateTimeOffset BootSessionUtc { get; set; }
+        if (_singBoxLogWriter is not null)
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(AppPaths.LogsDirectory);
+        var stream = new FileStream(
+            AppPaths.SingBoxLogPath,
+            append ? FileMode.Append : FileMode.Create,
+            FileAccess.Write,
+            FileShare.Read,
+            SingBoxLogBufferSize,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+        _singBoxLogWriter = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), SingBoxLogBufferSize)
+        {
+            AutoFlush = false
+        };
+
+        EnsureSingBoxFlushLoop();
+    }
+
+    private void EnsureSingBoxFlushLoop()
+    {
+        if (_singBoxFlushTask is not null)
+        {
+            return;
+        }
+
+        _singBoxFlushCts = new CancellationTokenSource();
+        _singBoxFlushTask = Task.Run(() => RunSingBoxFlushLoopAsync(_singBoxFlushCts.Token));
+    }
+
+    private async Task RunSingBoxFlushLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(SingBoxLogFlushInterval, cancellationToken);
+                await FlushSingBoxLogAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to flush sing-box log.");
+            }
+        }
+    }
+
+    private async Task CloseSingBoxLogWriterCoreAsync()
+    {
+        if (_singBoxLogWriter is null)
+        {
+            return;
+        }
+
+        await _singBoxLogWriter.FlushAsync();
+        await _singBoxLogWriter.DisposeAsync();
+        _singBoxLogWriter = null;
+    }
+
+    private async Task StopSingBoxFlushLoopAsync()
+    {
+        var cts = _singBoxFlushCts;
+        var task = _singBoxFlushTask;
+        _singBoxFlushCts = null;
+        _singBoxFlushTask = null;
+
+        if (cts is null)
+        {
+            return;
+        }
+
+        cts.Cancel();
+        try
+        {
+            if (task is not null)
+            {
+                await task;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+
+    public void Dispose()
+    {
+        DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        await StopSingBoxFlushLoopAsync();
+
+        await _singBoxLogLock.WaitAsync();
+        try
+        {
+            await CloseSingBoxLogWriterCoreAsync();
+        }
+        finally
+        {
+            _singBoxLogLock.Release();
+        }
+
+        _appLogLock.Dispose();
+        _singBoxLogLock.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
