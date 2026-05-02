@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SingTray.Shared.Enums;
 using SingTray.Shared.Models;
 
 namespace SingTray.Shared;
@@ -60,9 +61,11 @@ public sealed class OperationResult
 {
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
+    public OperationErrorKind? ErrorKind { get; set; }
 
     public static OperationResult Ok(string message) => new() { Success = true, Message = message };
-    public static OperationResult Fail(string message) => new() { Success = false, Message = message };
+    public static OperationResult Fail(string message, OperationErrorKind? errorKind = null) =>
+        new() { Success = false, Message = message, ErrorKind = errorKind };
 }
 
 public sealed class PingInfo

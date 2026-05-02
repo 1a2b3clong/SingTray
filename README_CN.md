@@ -67,15 +67,11 @@ C:\ProgramData\SingTray\logs\
 文件：
 
 - `app.log`：SingTray service 自身事件
-- `singbox.log`：sing-box 原始 stdout/stderr 输出
 
 规则：
 
 - `app.log` 在 service 启动时重建。
-- `singbox.log` 在 sing-box 启动时重建。
-- `singbox.log` 保留 sing-box 原始日志行，不额外添加 SingTray 时间戳。
-- sing-box 日志会缓冲写入，每 30 秒刷新一次。
-- sing-box 停止或退出时会立即刷新日志。
+- sing-box stdout/stderr 不再写入日志文件。
 
 ## 数据目录
 
@@ -95,7 +91,6 @@ C:\ProgramData\SingTray\
     <导入的配置文件名>.json
   logs\
     app.log
-    singbox.log
   state\
     state.json
   tmp\

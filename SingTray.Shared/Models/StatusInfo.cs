@@ -12,6 +12,7 @@ public sealed class StatusInfo
     public CoreInfo Core { get; set; } = new();
     public ConfigInfo Config { get; set; } = new();
     public string? LastError { get; set; }
+    public OperationErrorKind? LastErrorKind { get; set; }
     public PathInfo Paths { get; set; } = new();
     public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
     public long StateRevision { get; set; }

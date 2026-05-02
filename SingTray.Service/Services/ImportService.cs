@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using SingTray.Shared;
+using SingTray.Shared.Enums;
 using SingTray.Shared.Models;
 
 namespace SingTray.Service.Services;
@@ -138,7 +139,7 @@ public sealed class ImportService
             {
                 await _logService.WriteWarningAsync($"Core validation failed: {validation.Message}", cancellationToken);
                 await RefreshCoreStateAsync(cancellationToken);
-                return OperationResult.Fail($"Core invalid: {validation.Message}");
+                return OperationResult.Fail($"Core invalid: {validation.Message}", OperationErrorKind.CoreInvalid);
             }
 
             try
@@ -218,7 +219,7 @@ public sealed class ImportService
     {
         if (!File.Exists(configPath))
         {
-            return OperationResult.Fail("Config file does not exist.");
+            return OperationResult.Fail("Config file does not exist.", OperationErrorKind.ConfigInvalid);
         }
 
         try
@@ -228,13 +229,13 @@ public sealed class ImportService
         }
         catch (Exception ex)
         {
-            return OperationResult.Fail($"Config invalid: {ex.Message}");
+            return OperationResult.Fail($"Config invalid: {ex.Message}", OperationErrorKind.ConfigInvalid);
         }
 
         var configInfo = await _singBoxManager.ValidateConfigFileAsync(configPath, cancellationToken);
         return configInfo.Valid
             ? OperationResult.Ok("Config validation passed.")
-            : OperationResult.Fail(configInfo.ValidationMessage ?? "Config invalid.");
+            : OperationResult.Fail(configInfo.ValidationMessage ?? "Config invalid.", OperationErrorKind.ConfigInvalid);
     }
 
     private static string GetControlledImportPath(string importedFileName)

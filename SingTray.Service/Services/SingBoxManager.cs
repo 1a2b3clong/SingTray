@@ -19,6 +19,7 @@ public sealed class SingBoxManager
     private readonly LogService _logService;
     private Process? _currentProcess;
     private string? _lastStdErrLine;
+    private string? _lastFatalLine;
     private bool _stopRequested;
 
     public SingBoxManager(ServiceState serviceState, LogService logService)
@@ -67,8 +68,9 @@ public sealed class SingBoxManager
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            _lastStdErrLine = null;
+            _lastFatalLine = null;
             await CleanupManagedProcessesAsync("start pre-cleanup", cancellationToken);
-            await _logService.ResetSingBoxLogAsync(cancellationToken);
 
             if (IsTrackedProcessAlive())
             {
@@ -80,47 +82,47 @@ public sealed class SingBoxManager
 
             if (!core.Installed)
             {
-                return await FailStartAsync("Core not installed", cancellationToken);
+                return await FailStartAsync("Core not installed", cancellationToken, errorKind: OperationErrorKind.CoreInvalid);
             }
 
             if (!core.Valid)
             {
-                return await FailStartAsync(core.ValidationMessage ?? "Core invalid", cancellationToken);
+                return await FailStartAsync(core.ValidationMessage ?? "Core invalid", cancellationToken, errorKind: OperationErrorKind.CoreInvalid);
             }
 
             if (!config.Installed)
             {
-                return await FailStartAsync("Config not installed", cancellationToken);
+                return await FailStartAsync("Config not installed", cancellationToken, errorKind: OperationErrorKind.ConfigInvalid);
             }
 
             if (!config.Valid)
             {
-                return await FailStartAsync(config.ValidationMessage ?? "Config invalid", cancellationToken);
+                return await FailStartAsync(config.ValidationMessage ?? "Config invalid", cancellationToken, errorKind: OperationErrorKind.ConfigInvalid);
             }
 
             await _serviceState.UpdateAsync(record =>
             {
                 record.RunState = RunState.Starting;
                 record.LastError = null;
+                record.LastErrorKind = null;
             }, cancellationToken);
 
-            _lastStdErrLine = null;
-            var process = BuildProcess(AppPaths.SingBoxExecutablePath, SingBoxConstants.BuildRunArguments(activeConfigPath), AppPaths.CoreDirectory);
+            var process = BuildProcess(
+                AppPaths.SingBoxExecutablePath,
+                SingBoxConstants.BuildRunArguments(activeConfigPath),
+                AppPaths.CoreDirectory,
+                redirectStandardOutput: false);
             process.EnableRaisingEvents = true;
-            process.OutputDataReceived += (_, args) =>
-            {
-                if (!string.IsNullOrWhiteSpace(args.Data))
-                {
-                    _ = _logService.WriteSingBoxOutputAsync("stdout", args.Data, CancellationToken.None);
-                }
-            };
             process.ErrorDataReceived += (_, args) =>
             {
                 if (!string.IsNullOrWhiteSpace(args.Data))
                 {
                     var cleaned = StripAnsi(args.Data);
                     _lastStdErrLine = cleaned;
-                    _ = _logService.WriteSingBoxOutputAsync("stderr", cleaned, CancellationToken.None);
+                    if (IsFatalError(cleaned))
+                    {
+                        _lastFatalLine = cleaned;
+                    }
                 }
             };
             process.Exited += async (_, _) => await OnProcessExitedAsync(process);
@@ -130,15 +132,15 @@ public sealed class SingBoxManager
                 return await FailStartAsync("Failed to launch sing-box.", cancellationToken);
             }
 
-            process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             _currentProcess = process;
 
             if (!IsProcessAlive(process))
             {
                 var exitCode = process.ExitCode;
-                var error = BuildExitMessage(exitCode, _lastStdErrLine);
-                return await FailStartAsync(error, cancellationToken);
+                var stderr = GetBestRuntimeErrorLine();
+                var error = BuildExitMessage(exitCode, stderr);
+                return await FailStartAsync(error, cancellationToken, errorKind: ClassifyRuntimeStartError(stderr ?? error));
             }
 
             await _serviceState.UpdateAsync(record =>
@@ -146,6 +148,7 @@ public sealed class SingBoxManager
                 record.RunState = RunState.Running;
                 record.SingBoxPid = process.Id;
                 record.LastError = null;
+                record.LastErrorKind = null;
             }, cancellationToken);
 
             await _logService.WriteInfoAsync($"sing-box started with PID {process.Id}.", cancellationToken);
@@ -173,6 +176,7 @@ public sealed class SingBoxManager
                 {
                     record.RunState = RunState.Stopped;
                     record.SingBoxPid = null;
+                    record.LastErrorKind = null;
                 }, cancellationToken);
                 return OperationResult.Ok("sing-box is already stopped.");
             }
@@ -192,13 +196,12 @@ public sealed class SingBoxManager
                 return OperationResult.Fail("Failed to stop sing-box.");
             }
 
-            await _logService.FlushSingBoxLogAsync(cancellationToken);
-
             await _serviceState.UpdateAsync(record =>
             {
                 record.RunState = RunState.Stopped;
                 record.SingBoxPid = null;
                 record.LastError = null;
+                record.LastErrorKind = null;
             }, cancellationToken);
 
             if (ReferenceEquals(_currentProcess, trackedProcess))
@@ -216,6 +219,7 @@ public sealed class SingBoxManager
             {
                 record.RunState = RunState.Error;
                 record.LastError = ex.Message;
+                record.LastErrorKind = null;
             }, cancellationToken);
             return OperationResult.Fail($"Failed to stop sing-box: {ex.Message}");
         }
@@ -347,7 +351,11 @@ public sealed class SingBoxManager
         return OperationResult.Ok(versionLine);
     }
 
-    private static Process BuildProcess(string fileName, IEnumerable<string> arguments, string workingDirectory)
+    private static Process BuildProcess(
+        string fileName,
+        IEnumerable<string> arguments,
+        string workingDirectory,
+        bool redirectStandardOutput = true)
     {
         return new Process
         {
@@ -355,7 +363,7 @@ public sealed class SingBoxManager
             {
                 FileName = fileName,
                 WorkingDirectory = workingDirectory,
-                RedirectStandardOutput = true,
+                RedirectStandardOutput = redirectStandardOutput,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -419,16 +427,20 @@ public sealed class SingBoxManager
     {
         var exitCode = process.ExitCode;
         var isIntentionalStop = _stopRequested;
-        var stderrMessage = string.IsNullOrWhiteSpace(_lastStdErrLine) ? null : _lastStdErrLine;
+        var stderrMessage = GetBestRuntimeErrorLine();
         var exitStatus = BuildExitStatus(exitCode);
+        var exitMessage = BuildUnexpectedExitMessage(exitCode, stderrMessage);
+        OperationErrorKind? errorKind = exitCode == 0 || isIntentionalStop
+            ? null
+            : ClassifyUnexpectedExitError(stderrMessage);
 
         await _logService.WriteInfoAsync($"sing-box exited with code {exitCode}.", CancellationToken.None);
-        await _logService.FlushSingBoxLogAsync(CancellationToken.None);
         await _serviceState.UpdateAsync(record =>
         {
             record.SingBoxPid = null;
             record.RunState = exitCode == 0 || isIntentionalStop ? RunState.Stopped : RunState.Error;
-            record.LastError = isIntentionalStop ? null : stderrMessage;
+            record.LastError = isIntentionalStop ? null : exitMessage;
+            record.LastErrorKind = isIntentionalStop ? null : errorKind;
             record.ExitStatus = exitStatus;
         }, CancellationToken.None);
 
@@ -439,20 +451,27 @@ public sealed class SingBoxManager
         }
     }
 
-    private async Task<OperationResult> FailStartAsync(string message, CancellationToken cancellationToken, Exception? ex = null)
+    private async Task<OperationResult> FailStartAsync(
+        string message,
+        CancellationToken cancellationToken,
+        Exception? ex = null,
+        OperationErrorKind? errorKind = null)
     {
+        var effectiveMessage = GetBestRuntimeErrorLine() ?? message;
+        var effectiveErrorKind = errorKind ?? ClassifyRuntimeStartError(effectiveMessage);
         await _logService.WriteErrorAsync(message, ex, cancellationToken);
         await _serviceState.UpdateAsync(record =>
         {
             record.RunState = RunState.Error;
-            record.LastError = _lastStdErrLine ?? message;
+            record.LastError = effectiveMessage;
+            record.LastErrorKind = effectiveErrorKind;
             record.ExitStatus = "Start failed";
             record.SingBoxPid = null;
         }, cancellationToken);
 
         await CleanupCurrentProcessAsync(cancellationToken);
 
-        return OperationResult.Fail(message);
+        return OperationResult.Fail(effectiveMessage, effectiveErrorKind);
     }
 
     private async Task<(CoreInfo Core, ConfigInfo Config)> RefreshComponentStateAsync(CancellationToken cancellationToken)
@@ -662,6 +681,43 @@ public sealed class SingBoxManager
     private static string BuildExitStatus(int exitCode)
     {
         return exitCode == 0 ? "Exited normally" : $"Exited with code {exitCode}";
+    }
+
+    private static string BuildUnexpectedExitMessage(int exitCode, string? stderr)
+    {
+        if (IsFatalError(stderr))
+        {
+            return stderr!;
+        }
+
+        return $"sing-box exited unexpectedly with code {exitCode}.";
+    }
+
+    private string? GetBestRuntimeErrorLine()
+    {
+        return string.IsNullOrWhiteSpace(_lastFatalLine)
+            ? string.IsNullOrWhiteSpace(_lastStdErrLine) ? null : _lastStdErrLine
+            : _lastFatalLine;
+    }
+
+    private static OperationErrorKind ClassifyRuntimeStartError(string? message)
+    {
+        return IsFatalError(message)
+            ? OperationErrorKind.SingBoxFatal
+            : OperationErrorKind.SingBoxStartFailed;
+    }
+
+    private static OperationErrorKind ClassifyUnexpectedExitError(string? message)
+    {
+        return IsFatalError(message)
+            ? OperationErrorKind.SingBoxFatal
+            : OperationErrorKind.SingBoxUnexpectedExit;
+    }
+
+    private static bool IsFatalError(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+            && value.Contains("fatal", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string StripAnsi(string value)

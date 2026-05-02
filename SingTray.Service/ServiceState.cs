@@ -131,6 +131,7 @@ public sealed class ServiceState
             SingBoxRunning = record.RunState is RunState.Running or RunState.Starting,
             SingBoxPid = record.SingBoxPid,
             LastError = record.LastError,
+            LastErrorKind = record.LastErrorKind,
             ExitStatus = record.ExitStatus,
             Core = new CoreInfo
             {
@@ -179,6 +180,7 @@ public sealed class ServiceState
             RunState = source.RunState,
             SingBoxPid = source.SingBoxPid,
             LastError = source.LastError,
+            LastErrorKind = source.LastErrorKind,
             ExitStatus = source.ExitStatus,
             CoreInstalled = source.CoreInstalled,
             CoreValid = source.CoreValid,
@@ -198,6 +200,7 @@ public sealed class ServiceState
         return previous.RunState != current.RunState
             || previous.SingBoxPid != current.SingBoxPid
             || previous.LastError != current.LastError
+            || previous.LastErrorKind != current.LastErrorKind
             || previous.ExitStatus != current.ExitStatus
             || previous.CoreInstalled != current.CoreInstalled
             || previous.CoreValid != current.CoreValid

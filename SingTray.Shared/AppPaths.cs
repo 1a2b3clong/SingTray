@@ -20,7 +20,6 @@ public static class AppPaths
     public static string SingBoxExecutablePath => Path.Combine(CoreDirectory, "sing-box.exe");
     public static string ActiveConfigPath => GetConfigPath(DefaultConfigFileName);
     public static string AppLogPath => Path.Combine(LogsDirectory, "app.log");
-    public static string SingBoxLogPath => Path.Combine(LogsDirectory, "singbox.log");
     public static string ServiceStatePath => Path.Combine(StateDirectory, "state.json");
 
     public static string ClientStateDirectory =>

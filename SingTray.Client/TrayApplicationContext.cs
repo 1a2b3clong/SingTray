@@ -19,6 +19,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ContextMenuStrip _menu;
     private StatusInfo? _lastStatus;
     private string? _lastConnectionFailure;
+    private readonly HashSet<string> _shownErrorSignatures = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _activeErrorDialogSignatures = new(StringComparer.Ordinal);
     private bool _isBusy;
     private bool _isExiting;
     private readonly Icon _runningIcon;
@@ -39,9 +41,11 @@ public sealed class TrayApplicationContext : ApplicationContext
                 return;
             }
 
+            var previousStatus = _lastStatus;
             _lastStatus = status;
             _lastConnectionFailure = null;
             RefreshUi(serviceAvailable: true);
+            ShowStatusErrorIfNeeded(previousStatus, status);
         };
         _statusWatcher.WatchFailed += async (_, ex) =>
         {
@@ -53,6 +57,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
             _lastStatus = null;
             _lastConnectionFailure = BuildConnectionFailureMessage(ex);
+            _shownErrorSignatures.Clear();
             await _clientLogService.WriteWarningAsync($"Status poll failed: {_lastConnectionFailure}");
             RefreshUi(serviceAvailable: false);
         };
@@ -342,6 +347,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (runState is RunState.Starting or RunState.Running or RunState.Stopping or RunState.Stopped)
         {
             _lastStatus.LastError = null;
+            _lastStatus.LastErrorKind = null;
+            _shownErrorSignatures.Clear();
         }
 
         RefreshUi(serviceAvailable: true);
@@ -376,7 +383,7 @@ public sealed class TrayApplicationContext : ApplicationContext
                     return true;
                 }
 
-                ShowError(result.Message);
+                ShowOperationError(result);
                 return false;
             }
 
@@ -407,8 +414,170 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void ShowError(string message)
     {
-        _ = _clientLogService.WriteErrorAsync($"User-facing error: {message}");
-        MessageBox.Show(message, "SingTray", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        ShowError(message, "SingTray", MessageBoxIcon.Error);
+    }
+
+    private void ShowOperationError(OperationResult result)
+    {
+        var message = string.IsNullOrWhiteSpace(result.Message) ? "Operation failed." : result.Message;
+        if (!TryMarkTypedErrorShown(result.ErrorKind, message))
+        {
+            return;
+        }
+
+        ShowTypedError(result.ErrorKind, message);
+    }
+
+    private void ShowStatusErrorIfNeeded(StatusInfo? previousStatus, StatusInfo status)
+    {
+        if (previousStatus is null)
+        {
+            return;
+        }
+
+        if (status.RunState != RunState.Error)
+        {
+            return;
+        }
+
+        if (!IsUserFacingStatusError(status.LastErrorKind))
+        {
+            return;
+        }
+
+        var message = BuildStatusErrorMessage(status);
+        var signature = BuildErrorSignature(status.LastErrorKind, message);
+        if (_shownErrorSignatures.Contains(signature))
+        {
+            return;
+        }
+
+        if (previousStatus?.RunState == RunState.Error
+            && previousStatus.LastErrorKind == status.LastErrorKind
+            && string.Equals(BuildStatusErrorMessage(previousStatus), message, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!TryMarkTypedErrorShown(status.LastErrorKind, message))
+        {
+            return;
+        }
+
+        ShowTypedError(status.LastErrorKind, message);
+    }
+
+    private void ShowTypedError(OperationErrorKind? errorKind, string message)
+    {
+        switch (errorKind)
+        {
+            case OperationErrorKind.ConfigInvalid:
+                ShowError(
+                    $"Config validation failed.\r\n\r\n{message}",
+                    "SingTray - Config Error",
+                    MessageBoxIcon.Warning);
+                break;
+            case OperationErrorKind.SingBoxFatal:
+                ShowError(
+                    $"sing-box exited with a fatal error.\r\n\r\n{message}",
+                    "SingTray - sing-box Fatal Error",
+                    MessageBoxIcon.Error);
+                break;
+            case OperationErrorKind.SingBoxUnexpectedExit:
+                ShowError(
+                    $"sing-box stopped unexpectedly.\r\n\r\n{message}",
+                    "SingTray - sing-box Error",
+                    MessageBoxIcon.Error);
+                break;
+            case OperationErrorKind.SingBoxStartFailed:
+                ShowError(
+                    $"sing-box failed to start.\r\n\r\n{message}",
+                    "SingTray - sing-box Start Error",
+                    MessageBoxIcon.Error);
+                break;
+            default:
+                ShowError(message);
+                break;
+        }
+    }
+
+    private void ShowError(string message, string title, MessageBoxIcon icon)
+    {
+        var dialogSignature = BuildDialogSignature(title, message);
+        if (!_activeErrorDialogSignatures.Add(dialogSignature))
+        {
+            return;
+        }
+
+        try
+        {
+            _ = _clientLogService.WriteErrorAsync($"User-facing error ({title}): {message}");
+            MessageBox.Show(message, title, MessageBoxButtons.OK, icon);
+        }
+        finally
+        {
+            _activeErrorDialogSignatures.Remove(dialogSignature);
+        }
+    }
+
+    private static string BuildStatusErrorMessage(StatusInfo status)
+    {
+        if (!string.IsNullOrWhiteSpace(status.LastError))
+        {
+            return status.LastError;
+        }
+
+        if (status.LastErrorKind == OperationErrorKind.ConfigInvalid
+            && !string.IsNullOrWhiteSpace(status.Config.ValidationMessage))
+        {
+            return status.Config.ValidationMessage;
+        }
+
+        return status.ExitStatus ?? "sing-box failed.";
+    }
+
+    private static string BuildErrorSignature(OperationErrorKind? errorKind, string message)
+    {
+        return $"{errorKind?.ToString() ?? "Unknown"}|{NormalizeErrorMessage(message)}";
+    }
+
+    private static string BuildDialogSignature(string title, string message)
+    {
+        return $"{NormalizeErrorMessage(title)}|{NormalizeErrorMessage(message)}";
+    }
+
+    private static string NormalizeErrorMessage(string message)
+    {
+        return message
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Trim();
+    }
+
+    private bool TryMarkTypedErrorShown(OperationErrorKind? errorKind, string message)
+    {
+        if (!IsDeduplicatedTypedError(errorKind))
+        {
+            return true;
+        }
+
+        var signature = BuildErrorSignature(errorKind, message);
+        return _shownErrorSignatures.Add(signature);
+    }
+
+    private static bool IsUserFacingStatusError(OperationErrorKind? errorKind)
+    {
+        return errorKind is OperationErrorKind.ConfigInvalid
+            or OperationErrorKind.SingBoxFatal
+            or OperationErrorKind.SingBoxStartFailed
+            or OperationErrorKind.SingBoxUnexpectedExit;
+    }
+
+    private static bool IsDeduplicatedTypedError(OperationErrorKind? errorKind)
+    {
+        return errorKind is OperationErrorKind.ConfigInvalid
+            or OperationErrorKind.SingBoxFatal
+            or OperationErrorKind.SingBoxStartFailed
+            or OperationErrorKind.SingBoxUnexpectedExit;
     }
 
     private static string BuildToolTip(bool serviceAvailable, StatusInfo? status, string? lastConnectionFailure)

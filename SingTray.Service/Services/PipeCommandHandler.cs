@@ -106,5 +106,5 @@ public sealed class PipeCommandHandler
     }
 
     private static PipeResponse ToResponse(OperationResult result) =>
-        result.Success ? PipeResponse.FromSuccess(result) : PipeResponse.FromError(result.Message);
+        PipeResponse.FromSuccess(result);
 }

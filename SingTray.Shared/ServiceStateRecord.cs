@@ -7,6 +7,7 @@ public sealed class ServiceStateRecord
     public RunState RunState { get; set; } = RunState.Stopped;
     public int? SingBoxPid { get; set; }
     public string? LastError { get; set; }
+    public OperationErrorKind? LastErrorKind { get; set; }
     public string? ExitStatus { get; set; }
     public bool CoreInstalled { get; set; }
     public bool CoreValid { get; set; }

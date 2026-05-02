@@ -67,15 +67,11 @@ C:\ProgramData\SingTray\logs\
 Files:
 
 - `app.log`: SingTray service events
-- `singbox.log`: raw sing-box stdout/stderr output
 
 Behavior:
 
 - `app.log` is recreated when the service starts.
-- `singbox.log` is recreated when sing-box starts.
-- `singbox.log` keeps sing-box original log lines without extra SingTray timestamps.
-- sing-box logs are buffered and flushed every 30 seconds.
-- sing-box logs are also flushed when sing-box stops or exits.
+- sing-box stdout/stderr is not written to a log file.
 
 ## Data Folder
 
@@ -95,7 +91,6 @@ C:\ProgramData\SingTray\
     <imported config name>.json
   logs\
     app.log
-    singbox.log
   state\
     state.json
   tmp\
