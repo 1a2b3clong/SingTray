@@ -19,8 +19,9 @@ internal static class Program
         using var pipeClient = new PipeClient();
         using var importService = new FileImportService();
         using var desiredStateStore = new DesiredStateStore();
+        using var importDialogStateStore = new ImportDialogStateStore();
         using var clientLogService = new ClientLogService();
-        using var context = new TrayApplicationContext(pipeClient, importService, desiredStateStore, clientLogService);
+        using var context = new TrayApplicationContext(pipeClient, importService, desiredStateStore, importDialogStateStore, clientLogService);
         Application.Run(context);
     }
 }

@@ -12,6 +12,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly PipeClient _pipeClient;
     private readonly FileImportService _fileImportService;
     private readonly DesiredStateStore _desiredStateStore;
+    private readonly ImportDialogStateStore _importDialogStateStore;
     private readonly ClientLogService _clientLogService;
     private readonly StatusWatcher _statusWatcher;
     private readonly NotifyIcon _notifyIcon;
@@ -27,11 +28,12 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _stoppedIcon;
     private readonly Icon _errorIcon;
 
-    public TrayApplicationContext(PipeClient pipeClient, FileImportService fileImportService, DesiredStateStore desiredStateStore, ClientLogService clientLogService)
+    public TrayApplicationContext(PipeClient pipeClient, FileImportService fileImportService, DesiredStateStore desiredStateStore, ImportDialogStateStore importDialogStateStore, ClientLogService clientLogService)
     {
         _pipeClient = pipeClient;
         _fileImportService = fileImportService;
         _desiredStateStore = desiredStateStore;
+        _importDialogStateStore = importDialogStateStore;
         _clientLogService = clientLogService;
         _statusWatcher = new StatusWatcher(pipeClient);
         _statusWatcher.StatusUpdated += (_, status) =>
@@ -204,12 +206,15 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
+        var dialogState = await _importDialogStateStore.ReadAsync();
         using var dialog = new OpenFileDialog
         {
             Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
             Multiselect = false,
+            RestoreDirectory = true,
             Title = "Import Config"
         };
+        ApplyInitialDirectory(dialog, dialogState.ImportConfigDirectory);
 
         if (dialog.ShowDialog() != DialogResult.OK)
         {
@@ -219,6 +224,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         string? importedName = null;
         try
         {
+            await TryRememberImportConfigDirectoryAsync(dialog.FileName);
             importedName = await _fileImportService.PrepareImportAsync(dialog.FileName, CancellationToken.None);
             if (importedName is null)
             {
@@ -246,12 +252,15 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
+        var dialogState = await _importDialogStateStore.ReadAsync();
         using var dialog = new OpenFileDialog
         {
             Filter = "Official sing-box zip (*.zip)|*.zip",
             Multiselect = false,
+            RestoreDirectory = true,
             Title = "Import Core"
         };
+        ApplyInitialDirectory(dialog, dialogState.ImportCoreDirectory);
 
         if (dialog.ShowDialog() != DialogResult.OK)
         {
@@ -261,6 +270,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         string? importedName = null;
         try
         {
+            await TryRememberImportCoreDirectoryAsync(dialog.FileName);
             importedName = await _fileImportService.PrepareImportAsync(dialog.FileName, CancellationToken.None);
             if (importedName is null)
             {
@@ -278,6 +288,36 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             _fileImportService.DeletePreparedImport(importedName);
             _fileImportService.CleanupPreparedImports();
+        }
+    }
+
+    private async Task TryRememberImportConfigDirectoryAsync(string fileName)
+    {
+        try
+        {
+            await _importDialogStateStore.WriteConfigDirectoryAsync(Path.GetDirectoryName(fileName));
+        }
+        catch
+        {
+        }
+    }
+
+    private async Task TryRememberImportCoreDirectoryAsync(string fileName)
+    {
+        try
+        {
+            await _importDialogStateStore.WriteCoreDirectoryAsync(Path.GetDirectoryName(fileName));
+        }
+        catch
+        {
+        }
+    }
+
+    private static void ApplyInitialDirectory(OpenFileDialog dialog, string? directory)
+    {
+        if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
+        {
+            dialog.InitialDirectory = directory;
         }
     }
 
